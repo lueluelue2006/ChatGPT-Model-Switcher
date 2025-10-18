@@ -782,8 +782,8 @@
     cancel.style.borderRadius = '999px';
     cancel.style.background = 'transparent';
     cancel.style.color = 'inherit';
-    cancel.addEventListener('click', (e) => { 
-      e.stopPropagation(); e.preventDefault(); 
+    cancel.addEventListener('click', (e) => {
+      e.stopPropagation(); e.preventDefault();
       try { FM.info('badge cancel clicked'); } catch {}
       clearForceSticky();
     });
