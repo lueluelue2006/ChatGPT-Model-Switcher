@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.0
+// @version      2.1
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5
 // @match        https://chatgpt.com/
 // @match        https://chatgpt.com/?model=*
@@ -517,7 +517,7 @@
     }
     try {
       const url = new URL(window.location.href);
-      url.searchParams.set('model', id);
+      // url.searchParams.set('model', id); // 2.1: 暂停向 URL 写入 ?model 参数
       history.pushState({}, '', url.toString());
       try { window.dispatchEvent(new Event('pushstate')); } catch {}
       try { window.dispatchEvent(new Event('locationchange')); } catch {}
