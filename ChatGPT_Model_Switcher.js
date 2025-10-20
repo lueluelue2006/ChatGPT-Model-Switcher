@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.1
+// @version      2.2
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5
 // @match        https://chatgpt.com/
 // @match        https://chatgpt.com/?model=*
@@ -279,14 +279,12 @@
     if (!modelId) return;
     const norm = normalizeModelId(modelId);
     const name = prettyName(norm);
-    FM.info('update switcher label ->', name);
+    FM.info('update switcher state ->', name);
+    // 不再直接改写按钮内部结构，避免干扰 React 的 DOM 管理（会导致 removeChild 报错）
+    // 仅通过可见性无关的属性传递当前模型信息。
     document.querySelectorAll(`[data-testid="${TEST_ID_SWITCHER}"]`).forEach((btn) => {
-      const labelContainer = btn.querySelector('div, span');
-      if (labelContainer) {
-        labelContainer.textContent = `ChatGPT ${name}`;
-        labelContainer.style.color = 'var(--token-text-primary, var(--text-primary, inherit))';
-      }
-      btn.setAttribute('aria-label', `Model selector, current model is ${norm}`);
+      try { btn.setAttribute('aria-label', `Model selector, current model is ${norm}`); } catch {}
+      try { btn.setAttribute('title', `ChatGPT ${name}`); } catch {}
       btn.dataset.currentModel = norm;
     });
   }
@@ -849,6 +847,21 @@
   const CONVO_RE = /\/backend-api\/(f\/)?conversation(?:$|\?)/;
   const ANALYTICS_RE = /\/ces\/v1\/t(?:$|[/?#])/;
   const origFetch = W.fetch;
+  // 判断是否为 JSON 请求体（尽量避免对 multipart/form-data 等误判导致的 JSON 解析报错）
+  function isJsonRequest(req, init, bodyTxt) {
+    try {
+      const h = (req && req.headers) ? req.headers : (init && init.headers);
+      let ct = '';
+      if (h) {
+        try { ct = (typeof h.get === 'function') ? (h.get('content-type') || '') : (Array.isArray(h) ? (h.find(([k]) => String(k).toLowerCase() === 'content-type')?.[1] || '') : (h['Content-Type'] || h['content-type'] || '')); } catch {}
+      }
+      ct = String(ct || '').toLowerCase();
+      if (ct.includes('application/json')) return true;
+      // 进一步兜底：快速判断文本是否像 JSON
+      const t = String(bodyTxt || '').trim();
+      return t.startsWith('{') || t.startsWith('[');
+    } catch { return false; }
+  }
   W.fetch = async function(input, init) {
     try {
       const req = (input instanceof Request) ? input : new Request(input, init);
@@ -873,11 +886,14 @@
         // 透传
         return origFetch(input, init);
       }
-      // 放宽匹配范围：任何 POST 都尝试解析，只有在 body 含 model/action 时才改写
+      // 仅在 POST 且看起来是 JSON 的情况下再尝试解析与改写，避免无意义的解析报错
       if (method !== 'POST') { return origFetch(input, init); }
       let bodyTxt = '';
       try { bodyTxt = await req.clone().text(); } catch {}
       if (!bodyTxt) return origFetch(input, init);
+      if (!isJsonRequest(req, init, bodyTxt)) {
+        return origFetch(input, init);
+      }
       try {
         const body = JSON.parse(bodyTxt);
         const wantOnce = forceModelOverrideOnce || null;
@@ -893,9 +909,12 @@
           const old = body.model;
           body.model = wantOnce;
           const newTxt = JSON.stringify(body);
+          // 复制 headers，确保为 JSON，并避免遗留 content-length
+          const headers = new Headers(req.headers || (init && init.headers) || undefined);
+          try { headers.set('content-type', 'application/json'); headers.delete('content-length'); } catch {}
           const newInit = {
             method: req.method || (init && init.method) || 'POST',
-            headers: req.headers,
+            headers,
             body: newTxt,
             credentials: req.credentials,
             cache: req.cache,
@@ -907,6 +926,8 @@
             keepalive: req.keepalive,
             signal: req.signal,
           };
+          // 保留/补充 duplex 以兼容 Chrome 的半双工请求（站点常用于流式接口）
+          try { if (init && 'duplex' in init) newInit.duplex = init.duplex; else newInit.duplex = 'half'; } catch {}
           try { FM.info(`rewrite model: ${old} -> ${body.model} | action=${body.action} | override=true`); } catch {}
           clearOverrideOnce();
           return origFetch(req.url, newInit);
@@ -924,9 +945,11 @@
           const old = body.model;
           body.model = stickyBase;
           const newTxt = JSON.stringify(body);
+          const headers = new Headers(req.headers || (init && init.headers) || undefined);
+          try { headers.set('content-type', 'application/json'); headers.delete('content-length'); } catch {}
           const newInit = {
             method: req.method || (init && init.method) || 'POST',
-            headers: req.headers,
+            headers,
             body: newTxt,
             credentials: req.credentials,
             cache: req.cache,
@@ -938,10 +961,17 @@
             keepalive: req.keepalive,
             signal: req.signal,
           };
+          try { if (init && 'duplex' in init) newInit.duplex = init.duplex; else newInit.duplex = 'half'; } catch {}
           try { FM.info(`rewrite model: ${old} -> ${body.model} | action=${body.action} | sticky=true`); } catch {}
           return origFetch(req.url, newInit);
         }
-      } catch (e) { try { FM.warn('rewrite parse error', e?.message || e); } catch {} }
+      } catch (e) {
+        // 仅在看起来是会话相关接口时提示解析问题；其他 POST（如上传/打点）静默忽略
+        try {
+          const looksLikeConv = /\/backend-api\//i.test(req.url || '') || /\b(messages|input_text|prompt)\b/.test(bodyTxt || '');
+          if (looksLikeConv) FM.warn('rewrite parse error', e?.message || e);
+        } catch {}
+      }
       return origFetch(input, init);
     } catch (err) {
       return origFetch(input, init);
