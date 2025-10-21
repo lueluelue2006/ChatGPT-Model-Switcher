@@ -2,9 +2,9 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.2
-// @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5
-// @match        https://chatgpt.com/
+// @version      2.3
+// @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
+// @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
 // @match        https://chatgpt.com/?temporary-chat=*
 // @match        https://chatgpt.com/c/*
@@ -287,6 +287,8 @@
       try { btn.setAttribute('title', `ChatGPT ${name}`); } catch {}
       btn.dataset.currentModel = norm;
     });
+    try { window.__fmCurrentModel = norm; } catch {}
+    try { updateStandaloneToggleLabel(); } catch {}
   }
 
   function updateAllSwitcherButtonsFromURL() {
@@ -664,18 +666,20 @@
   }
   // 优先触发“重试模型选择器”里的原生项；若不存在则触发“重试/Regenerate”按钮。
   function clickNativeOrRetry() {
-    const nativeItem = findNativeAnchor(lastVariantMenuRoot);
-    if (nativeItem) {
-      try { FM.info('variant click -> native anchor'); } catch {}
-      nativeItem.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-      nativeItem.click();
-      return true;
-    }
+    // 优先直接触发“重试/Regenerate”，确保立即产生一次对话请求以消费一次性覆盖/抑制
     const retry = findRetryBtn();
     if (retry) {
       try { FM.info('variant click -> retry button'); } catch {}
       retry.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
       retry.click();
+      return true;
+    }
+    // 回退：点击一个稳定存在的原生锚点项（如 o4 mini / gpt-4o / gpt-4.1）
+    const nativeItem = findNativeAnchor(lastVariantMenuRoot);
+    if (nativeItem) {
+      try { FM.info('variant click -> native anchor'); } catch {}
+      nativeItem.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      nativeItem.click();
       return true;
     }
     console.warn('[fm] 未找到原生菜单项或“重试”按钮；请手动触发一次重试/选择模型。');
@@ -697,7 +701,8 @@
   // 常驻拦截（每个标签页独立生效）
   let forceModelSticky = null;      // 常驻拦截：始终改写为该模型（每个标签页独立）
   let forceModelOverrideOnce = null; // 临时重试覆盖：只对下一次请求生效，随后恢复常驻
-  let suppressStickyOnce = false;    // 临时抑制：本次请求不应用常驻（用于点击原生重试项）
+  let suppressStickyUntil = 0;       // 临时抑制窗口：在窗口期内，下一次“会话请求”不应用常驻
+  let stickyHardBlockUntil = 0;      // 硬阻断窗口：override armed 时，短时彻底禁用 sticky
   let interceptBadge = null;        // UI 元素
   let repositionTimer = null;       // 节流定位计时
   function setForceSticky(modelId) {
@@ -705,24 +710,29 @@
     if (!forceModelSticky) return;
     try { FM.info('sticky on ->', forceModelSticky); } catch {}
     updateInterceptBadge('on');
+    try { updateStandaloneToggleLabel(); } catch {}
   }
   function clearForceSticky() {
     forceModelSticky = null;
     try { FM.info('sticky off'); } catch {}
     updateInterceptBadge('off');
+    try { updateStandaloneToggleLabel(); } catch {}
   }
   function setOverrideOnce(modelId) {
     forceModelOverrideOnce = String(modelId || '').trim();
     try { FM.info('override once ->', forceModelOverrideOnce); } catch {}
     // 不改徽标文字，保持显示常驻模型
+    // 开一个硬阻断窗口：在 override 消耗前，sticky 完全不介入会话请求
+    try { stickyHardBlockUntil = Date.now() + 15000; } catch {}
   }
   function clearOverrideOnce() {
     forceModelOverrideOnce = null;
     try { FM.info('override cleared'); } catch {}
   }
   function suppressStickyNext(label = '') {
-    suppressStickyOnce = true;
-    try { FM.info('suppress sticky once by native retry ->', label); } catch {}
+    // 开启一个短窗口（10s），仅对“下一个会话请求”生效，并且只在真正的会话端点上消耗
+    try { FM.info('suppress sticky window start by native retry ->', label); } catch {}
+    suppressStickyUntil = Date.now() + 10000;
   }
   // 无单次消耗逻辑
 
@@ -800,7 +810,185 @@
       const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.left < (window.innerWidth || 0) && rect.top < (window.innerHeight || 0);
       if (visible) return el;
     }
+    // fallback: use standalone toggle if visible
+    const fallback = document.getElementById('fm-standalone-toggle');
+    if (fallback) {
+      try {
+        const r = fallback.getBoundingClientRect();
+        const ok = r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.left < (window.innerWidth || 0) && r.top < (window.innerHeight || 0);
+        if (ok) return fallback;
+      } catch {}
+    }
     return null;
+  }
+
+  // ---------------- 独立模型选择器（在无官方切换按钮的页面提供入口） ----------------
+  function hasNativeSwitcherVisible() {
+    const list = document.querySelectorAll(`[data-testid="${TEST_ID_SWITCHER}"]`);
+    for (const el of list) {
+      const rect = el.getBoundingClientRect();
+      const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.left < (window.innerWidth || 0) && rect.top < (window.innerHeight || 0);
+      if (visible) return true;
+    }
+    return false;
+  }
+
+  function buildStandaloneMenuItems(menu) {
+    if (!menu) return;
+    menu.textContent = '';
+    const desired = getDesiredOrder();
+    const used = new Set();
+    for (const id of desired) {
+      if (used.has(id)) continue;
+      used.add(id);
+      if (!isModelAllowed(id)) continue;
+      const item = document.createElement('div');
+      item.className = '__fm-standalone-item';
+      item.setAttribute('data-model-id', id);
+      item.textContent = prettyName(id);
+      item.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        try { setForceSticky(id); } catch {}
+        try { selectModelQuick(id); } catch {}
+        try { hideStandaloneMenu(); } catch {}
+      });
+      menu.appendChild(item);
+    }
+  }
+
+  function getCurrentModelIdForDisplay() {
+    // 1) 优先显示常驻模型
+    if (forceModelSticky) return normalizeModelId(forceModelSticky);
+    // 2) 取可见原生按钮标记的当前模型
+    const list = document.querySelectorAll(`[data-testid="${TEST_ID_SWITCHER}"]`);
+    for (const el of list) {
+      try {
+        const rect = el.getBoundingClientRect();
+        const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.left < (window.innerWidth || 0) && rect.top < (window.innerHeight || 0);
+        const cur = (el.dataset && el.dataset.currentModel) ? normalizeModelId(el.dataset.currentModel) : '';
+        if (visible && cur) return cur;
+      } catch {}
+    }
+    // 3) 退回到脚本记录的最近一次
+    const cur = (window.__fmCurrentModel || '').toString();
+    return normalizeModelId(cur);
+  }
+
+  function updateStandaloneToggleLabel() {
+    const btn = document.getElementById('fm-standalone-toggle');
+    if (!btn) return;
+    const id = getCurrentModelIdForDisplay();
+    const name = id ? prettyName(id) : '选择模型';
+    btn.textContent = name;
+    try { btn.setAttribute('title', `当前模型：${name}`); } catch {}
+  }
+
+  function updateStandaloneSelection(menu) {
+    if (!menu) return;
+    const current = normalizeModelId((window.__fmCurrentModel || '') || (forceModelSticky || ''));
+    menu.querySelectorAll('.__fm-standalone-item').forEach((el) => {
+      const id = normalizeModelId(el.getAttribute('data-model-id') || '');
+      el.classList.toggle('is-active', !!current && id === current);
+    });
+  }
+
+  function hideStandaloneMenu() {
+    const menu = document.getElementById('fm-standalone-menu');
+    if (menu) menu.style.display = 'none';
+  }
+
+  function toggleStandaloneMenu() {
+    const menu = document.getElementById('fm-standalone-menu');
+    if (!menu) return;
+    const show = menu.style.display === 'none' || !menu.style.display;
+    if (show) {
+      buildStandaloneMenuItems(menu);
+      updateStandaloneSelection(menu);
+      menu.style.display = '';
+    } else {
+      menu.style.display = 'none';
+    }
+  }
+
+  function ensureStandaloneSwitcher() {
+    const exists = document.getElementById('fm-standalone-switcher');
+    const need = !hasNativeSwitcherVisible();
+    if (!need) {
+      if (exists) exists.style.display = 'none';
+      return;
+    }
+    let box = exists;
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'fm-standalone-switcher';
+      box.style.position = 'fixed';
+      box.style.left = '16px';
+      box.style.top = '16px';
+      box.style.zIndex = '9999999999';
+      box.style.fontSize = '14px';
+      box.style.userSelect = 'none';
+      box.style.pointerEvents = 'auto';
+      const btn = document.createElement('button');
+      btn.id = 'fm-standalone-toggle';
+      btn.type = 'button';
+      btn.style.padding = '4px 10px';
+      btn.style.borderRadius = '8px';
+      btn.style.border = '1px solid var(--token-border, rgba(0,0,0,0.1))';
+      btn.style.background = 'var(--token-surface-primary, #fff)';
+      btn.style.color = 'var(--token-text-primary, #111)';
+      btn.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+      btn.style.fontSize = '12px';
+      btn.style.fontWeight = '500';
+      btn.style.maxWidth = '240px';
+      btn.style.whiteSpace = 'nowrap';
+      btn.style.overflow = 'hidden';
+      btn.style.textOverflow = 'ellipsis';
+      btn.addEventListener('click', (e) => { e.stopPropagation(); toggleStandaloneMenu(); });
+      const menu = document.createElement('div');
+      menu.id = 'fm-standalone-menu';
+      menu.style.position = 'absolute';
+      menu.style.left = '0';
+      menu.style.top = '42px';
+      menu.style.minWidth = '180px';
+      menu.style.maxHeight = '60vh';
+      menu.style.overflow = 'auto';
+      menu.style.padding = '6px';
+      menu.style.borderRadius = '12px';
+      menu.style.background = 'var(--token-surface-primary, #fff)';
+      menu.style.border = '1px solid var(--token-border, rgba(0,0,0,0.12))';
+      menu.style.boxShadow = '0 8px 24px rgba(0,0,0,0.12)';
+      menu.style.display = 'none';
+      // click outside to close
+      document.addEventListener('click', (ev) => {
+        const t = ev.target;
+        if (!t || !(t instanceof Element)) return;
+        if (t.closest('#fm-standalone-switcher')) return;
+        hideStandaloneMenu();
+      }, { capture: true });
+      box.appendChild(btn);
+      box.appendChild(menu);
+      (document.body || document.documentElement).appendChild(box);
+      // style for items
+      const style = document.getElementById('fm-standalone-style') || document.createElement('style');
+      style.id = 'fm-standalone-style';
+      style.textContent = `
+        #fm-standalone-menu { font-size: 14px; }
+        #fm-standalone-menu .__fm-standalone-item {
+          padding: 8px 10px; border-radius: 8px; cursor: pointer;
+          color: var(--token-text-primary, #111);
+        }
+        #fm-standalone-menu .__fm-standalone-item:hover {
+          background: var(--token-surface-secondary, rgba(0,0,0,0.04));
+        }
+        #fm-standalone-menu .__fm-standalone-item.is-active {
+          background: var(--token-surface-brand, #10a37f); color: #fff;
+        }
+      `;
+      document.documentElement.appendChild(style);
+      // 初始化按钮显示文案
+      try { updateStandaloneToggleLabel(); } catch {}
+    }
+    box.style.display = '';
   }
   function positionBadgeNearSwitcher() {
     const b = ensureInterceptBadge();
@@ -845,6 +1033,7 @@
     try { FM.info('badge show ->', modelName); } catch {}
   }
   const CONVO_RE = /\/backend-api\/(f\/)?conversation(?:$|\?)/;
+  const BACKEND_RE = /\/backend-api\//i;
   const ANALYTICS_RE = /\/ces\/v1\/t(?:$|[/?#])/;
   const origFetch = W.fetch;
   // 判断是否为 JSON 请求体（尽量避免对 multipart/form-data 等误判导致的 JSON 解析报错）
@@ -867,6 +1056,7 @@
       const req = (input instanceof Request) ? input : new Request(input, init);
       const url = req.url || (typeof input === 'string' ? input : '');
       const method = (req.method || (init && init.method) || 'GET').toUpperCase();
+      const isBackend = BACKEND_RE.test(url);
       // 监听 Analytics：Model Switcher 事件，提取 target model 更新按钮文案
       if (ANALYTICS_RE.test(url) && method === 'POST') {
         try {
@@ -890,8 +1080,20 @@
       if (method !== 'POST') { return origFetch(input, init); }
       let bodyTxt = '';
       try { bodyTxt = await req.clone().text(); } catch {}
-      if (!bodyTxt) return origFetch(input, init);
+      if (!bodyTxt) {
+        // 没有可读 body：若 override armed，严格禁止 sticky 介入后台会话请求
+        if (forceModelOverrideOnce && isBackend && Date.now() < stickyHardBlockUntil) {
+          try { FM.info('fetch: hard block sticky (no body, backend)'); } catch {}
+          return origFetch(input, init);
+        }
+        return origFetch(input, init);
+      }
       if (!isJsonRequest(req, init, bodyTxt)) {
+        // 非 JSON：若 override armed，严格禁止 sticky 介入后台会话请求
+        if (forceModelOverrideOnce && isBackend && Date.now() < stickyHardBlockUntil) {
+          try { FM.info('fetch: hard block sticky (non-json, backend)'); } catch {}
+          return origFetch(input, init);
+        }
         return origFetch(input, init);
       }
       try {
@@ -902,10 +1104,15 @@
         const hasModelKey = Object.prototype.hasOwnProperty.call(body || {}, 'model');
         const stickyActions = new Set(['variant','next','continue','create','creation','reply','submit','resume']);
         const CONV_URL_RE = /\/backend-api\/(f\/)?(conversation|chat|messages|compact)(?:$|[?/#])/i;
-        const looksLikeConversation = hasModelKey || stickyActions.has(action) || CONV_URL_RE.test(url) || /\b(messages|input_text|prompt|conversation_id|parent_message_id)\b/.test(bodyTxt);
+        const isConvPath = CONV_URL_RE.test(url);
+        const looksLikeConversation = hasModelKey || stickyActions.has(action) || isConvPath || /\b(messages|input_text|prompt|conversation_id|parent_message_id)\b/.test(bodyTxt);
+        const looksLikeGeneration = isConvPath && (hasModelKey || stickyActions.has(action) || /\b(messages|input_text|prompt)\b/.test(bodyTxt));
 
-        // 1) 重试覆盖：仅在会话请求上消耗，避免被其他 POST 提前吃掉
-        if (wantOnce && looksLikeConversation) {
+        // 0) 硬阻断：override armed 时，无论是否能改写 body，都阻断 sticky
+        const hardBlockSticky = !!(wantOnce && Date.now() < stickyHardBlockUntil);
+
+        // 1) 重试覆盖：严格要求命中“会话端点”才消耗与改写；若未命中则不消耗，但 sticky 也不介入（硬阻断）
+        if (wantOnce && isConvPath && looksLikeGeneration) {
           const old = body.model;
           body.model = wantOnce;
           const newTxt = JSON.stringify(body);
@@ -933,15 +1140,20 @@
           return origFetch(req.url, newInit);
         }
 
-        // 2) 抑制常驻：对“下一次对话请求”不应用 sticky（原样透传），随后清除抑制
-        if (suppressStickyOnce && looksLikeConversation) {
-          try { FM.info('suppress sticky for this request | action=', action || '(n/a)'); } catch {}
-          suppressStickyOnce = false;
-          return origFetch(input, init);
+        // 2) 抑制常驻：在窗口期内，仅当命中真正的会话端点时才消耗一次
+        if (suppressStickyUntil > 0) {
+          const now = Date.now();
+          if (now < suppressStickyUntil && looksLikeGeneration) {
+            try { FM.info('suppress sticky for this conversation request | action=', action || '(n/a)'); } catch {}
+            suppressStickyUntil = 0; // 仅消耗一次
+            return origFetch(input, init);
+          }
+          // 过期自动清理
+          if (now >= suppressStickyUntil) suppressStickyUntil = 0;
         }
 
-        // 3) 常驻：对对话请求应用
-        if (stickyBase && looksLikeConversation) {
+        // 3) 常驻：仅对“会话端点”应用；当 override armed 且处于硬阻断窗口时，跳过 sticky
+        if (stickyBase && looksLikeGeneration && !(forceModelOverrideOnce && hardBlockSticky)) {
           const old = body.model;
           body.model = stickyBase;
           const newTxt = JSON.stringify(body);
@@ -964,6 +1176,12 @@
           try { if (init && 'duplex' in init) newInit.duplex = init.duplex; else newInit.duplex = 'half'; } catch {}
           try { FM.info(`rewrite model: ${old} -> ${body.model} | action=${body.action} | sticky=true`); } catch {}
           return origFetch(req.url, newInit);
+        }
+
+        // override armed 但未命中会话请求：避免 sticky 介入，透传
+        if (forceModelOverrideOnce && hardBlockSticky && isBackend) {
+          try { FM.info('fetch: override armed, skip sticky (backend pass-through)'); } catch {}
+          return origFetch(input, init);
         }
       } catch (e) {
         // 仅在看起来是会话相关接口时提示解析问题；其他 POST（如上传/打点）静默忽略
@@ -1003,6 +1221,10 @@
       try { FM.info('variant choose -> override once', targetModel); } catch {}
       // 重试菜单：仅设置一次性覆盖，优先级高于常驻；消耗后恢复常驻
       setOverrideOnce(targetModel);
+      // 同时抑制一次常驻，防止在极端情况下（如请求体非 JSON/解析失败）仍被常驻覆盖
+      suppressStickyNext('variant-quick');
+      // 兼容旧的 2 秒时间窗策略，作为兜底（与一次性覆盖共同作用）
+      try { setForce(targetModel, 2000); } catch {}
       setTimeout(() => {
         const ok = clickNativeOrRetry();
         if (!ok) console.warn('[fm] 没能自动触发；你可手动点一次重试，窗口仍然生效。');
@@ -1097,6 +1319,10 @@
     document.querySelectorAll(`[data-testid="${TEST_ID_SWITCHER}"]`).forEach(attach);
     const obsButtons = new MutationObserver(() => { document.querySelectorAll(`[data-testid="${TEST_ID_SWITCHER}"]`).forEach(attach); });
     obsButtons.observe(document.body, { childList: true, subtree: true });
+    // 独立模型选择器：在无官方按钮时提供入口
+    ensureStandaloneSwitcher();
+    const obsStandalone = new MutationObserver(() => { ensureStandaloneSwitcher(); scheduleReposition(); });
+    obsStandalone.observe(document.body, { childList: true, subtree: true });
 
     // 全局兜底：任意新开的菜单，按类型分别处理（Main/重试）
     const menuObserver = new MutationObserver((mutations) => {
@@ -1146,4 +1372,115 @@
     [role="separator"].bg-token-border-default.h-px.mx-4.my-1 { display: none !important; }
   `;
   document.documentElement.appendChild(style);
+
+  // 额外兜底：拦截 XHR（部分页面可能用 XHR 发送对话请求）
+  try {
+    const P = XMLHttpRequest.prototype;
+    const origOpen = P.open;
+    const origSend = P.send;
+    const origSetHeader = P.setRequestHeader;
+    P.open = function(method, url, async, user, password) {
+      try {
+        this.__fm = this.__fm || {};
+        this.__fm.method = String(method || '').toUpperCase();
+        this.__fm.url = String(url || '');
+        this.__fm.headers = {};
+      } catch {}
+      return origOpen.apply(this, arguments);
+    };
+    P.setRequestHeader = function(k, v) {
+      try {
+        if (this.__fm && this.__fm.headers) { this.__fm.headers[String(k || '').toLowerCase()] = String(v || ''); }
+      } catch {}
+      return origSetHeader.apply(this, arguments);
+    };
+    P.send = function(body) {
+      try {
+        const info = this.__fm || {};
+        const method = String(info.method || '').toUpperCase();
+        const url = String(info.url || '');
+        const isBackend = BACKEND_RE.test(url);
+        if (method !== 'POST') return origSend.apply(this, arguments);
+
+        let txt = null;
+        if (typeof body === 'string') txt = body;
+        // 仅处理字符串 JSON；其他类型（FormData/Blob）不改写，保持安全
+        if (!txt) {
+          // override armed → 硬阻断 sticky，对 backend 直接透传
+          if (forceModelOverrideOnce && isBackend && Date.now() < stickyHardBlockUntil) {
+            try { FM.info('xhr: hard block sticky (non-string body, backend)'); } catch {}
+            return origSend.apply(this, arguments);
+          }
+          return origSend.apply(this, arguments);
+        }
+
+        // 快速判定是否像 JSON
+        const likeJson = /^\s*[{\[]/.test(txt);
+        if (!likeJson) {
+          if (forceModelOverrideOnce && isBackend && Date.now() < stickyHardBlockUntil) {
+            try { FM.info('xhr: hard block sticky (non-json text)'); } catch {}
+            return origSend.apply(this, arguments);
+          }
+          return origSend.apply(this, arguments);
+        }
+
+        try {
+          const data = JSON.parse(txt);
+          const wantOnce = forceModelOverrideOnce || null;
+          const stickyBase = forceModelSticky || (inWindow() ? forceModel : null);
+          const action = String(data?.action || '').toLowerCase();
+          const hasModelKey = Object.prototype.hasOwnProperty.call(data || {}, 'model');
+          const stickyActions = new Set(['variant','next','continue','create','creation','reply','submit','resume']);
+          const CONV_URL_RE = /\/backend-api\/(f\/)?(conversation|chat|messages|compact)(?:$|[?/#])/i;
+          const isConvPath = CONV_URL_RE.test(url);
+          const looksLikeGeneration = isConvPath && (hasModelKey || stickyActions.has(action) || /\b(messages|input_text|prompt)\b/.test(txt));
+          const hardBlockSticky = !!(wantOnce && Date.now() < stickyHardBlockUntil);
+
+          // 优先：override once
+          if (wantOnce && isConvPath && looksLikeGeneration) {
+            const old = data.model;
+            data.model = wantOnce;
+            const newTxt = JSON.stringify(data);
+            try { this.setRequestHeader('content-type', 'application/json'); } catch {}
+            try { FM.info(`xhr rewrite model: ${old} -> ${data.model} | action=${data.action} | override=true`); } catch {}
+            clearOverrideOnce();
+            return origSend.call(this, newTxt);
+          }
+
+          // 抑制 sticky 窗口
+          if (suppressStickyUntil > 0) {
+            const now = Date.now();
+            if (now < suppressStickyUntil && looksLikeGeneration) {
+              try { FM.info('xhr suppress sticky for this conversation request'); } catch {}
+              suppressStickyUntil = 0;
+              return origSend.apply(this, arguments);
+            }
+            if (now >= suppressStickyUntil) suppressStickyUntil = 0;
+          }
+
+          // sticky：在无硬阻断时应用
+          if (stickyBase && looksLikeGeneration && !(forceModelOverrideOnce && hardBlockSticky)) {
+            const old = data.model;
+            data.model = stickyBase;
+            const newTxt = JSON.stringify(data);
+            try { this.setRequestHeader('content-type', 'application/json'); } catch {}
+            try { FM.info(`xhr rewrite model: ${old} -> ${data.model} | action=${data.action} | sticky=true`); } catch {}
+            return origSend.call(this, newTxt);
+          }
+
+          // override armed 未命中：阻断 sticky，透传
+          if (forceModelOverrideOnce && hardBlockSticky && isBackend) {
+            try { FM.info('xhr: override armed, skip sticky (backend pass-through)'); } catch {}
+            return origSend.apply(this, arguments);
+          }
+
+        } catch (e) {
+          try { FM.warn('xhr parse error', e?.message || e); } catch {}
+        }
+        return origSend.apply(this, arguments);
+      } catch (err) {
+        return origSend.apply(this, arguments);
+      }
+    };
+  } catch {}
 })();
