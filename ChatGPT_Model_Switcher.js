@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.3.2
+// @version      2.3.3
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
 // @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -155,6 +155,8 @@
 
   // 默认目标顺序（按 data-testid 后缀）
   const BASE_ORDER = [
+    // 将阿尔法模型置于最前
+    'chatgpt_alpha_model_external_access_reserved_gate_13',
     'gpt-5-thinking',
     'gpt-5-t-mini',
     'gpt-5-instant',
@@ -168,7 +170,6 @@
     'o3-pro',
     'gpt-5-pro',
     'gpt-4-5',
-    'chatgpt_alpha_model_external_access_reserved_gate_13',
   ];
   const PRO_PRIORITY_ORDER = [
     'gpt-5-thinking',
@@ -229,6 +230,8 @@
   function isModelAllowed(id) {
     const norm = normalizeModelId(id);
     const tier = getTier() || SUB_DEFAULT;
+    // 阿尔法模型对所有订阅可见
+    if (norm === 'chatgpt_alpha_model_external_access_reserved_gate_13') return true;
     if (tier === 'free' || tier === 'go') {
       return norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini';
     }
@@ -1237,7 +1240,7 @@
     span.dataset.fmItem = '1';
     return span;
   }
-  // 在“重试模型选择器”中找到锚点项，并在其后插入若干快捷项。
+  // 在“重试模型选择器”中找到锚点项，并插入若干快捷项（置于锚点项之前，使其位于顶部）。
   function enhanceVariantMenu(root) {
     if (!root || root.dataset.fmAugmented) return;
     if (!isVariantMenu(root)) return;
@@ -1254,16 +1257,17 @@
     if (!anchor) return;
     const anchorSpan = anchor.closest('span') || anchor;
     const ALL_QUICK = [
+      { label: 'α',            slug: 'chatgpt_alpha_model_external_access_reserved_gate_13' },
       { label: 'o3 pro',       slug: 'o3-pro' },
       { label: 'GPT 5 mini',   slug: 'gpt-5-mini' },
       { label: 'o4 mini high', slug: 'o4-mini-high' },
       { label: 'GPT 4.5',      slug: 'gpt-4-5' },
-      { label: 'α',            slug: 'chatgpt_alpha_model_external_access_reserved_gate_13' },
     ];
     const QUICK_MODELS = ALL_QUICK.filter(q => isModelAllowed(q.slug));
     QUICK_MODELS.forEach(q => {
       const node = createVariantMenuItem(q);
-      anchorSpan.parentNode.insertBefore(node, anchorSpan.nextSibling);
+      // 插入到锚点项之前，确保 Alpha 等快捷项位于菜单最前
+      anchorSpan.parentNode.insertBefore(node, anchorSpan);
     });
 
     // 捕获原生菜单项点击：当用户点击 Auto/Instant/Thinking/Pro/Ultra 等原生项时，
