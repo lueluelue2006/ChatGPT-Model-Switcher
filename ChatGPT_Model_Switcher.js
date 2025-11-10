@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.3.4
+// @version      2.3.5
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
 // @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -230,17 +230,15 @@
   function isModelAllowed(id) {
     const norm = normalizeModelId(id);
     const tier = getTier() || SUB_DEFAULT;
-    // 需求：仅保留 pro 订阅下的 o3-pro；其它模型隐藏
-    if (tier === 'pro') {
-      return norm === 'o3-pro';
-    }
+    // 修正：o3-pro 仅对 pro 可见；非 pro 隐藏 o3-pro
+    if (norm === 'o3-pro' && tier !== 'pro') return false;
     // 阿尔法模型对所有订阅可见
     if (norm === 'chatgpt_alpha_model_external_access_reserved_gate_13') return true;
     if (tier === 'free' || tier === 'go') {
       return norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini';
     }
     if (tier === 'plus') {
-      if (norm === 'o3-pro' || norm === 'gpt-5-pro' || norm === 'gpt-4-5') return false;
+      if (norm === 'gpt-5-pro' || norm === 'gpt-4-5') return false;
       return true;
     }
     // team 目前无 GPT 4.5
@@ -248,7 +246,7 @@
       if (norm === 'gpt-4-5') return false;
       return true;
     }
-    // edu / enterprise 全量可用
+    // edu / enterprise / pro 其余按默认
     return true;
   }
 
