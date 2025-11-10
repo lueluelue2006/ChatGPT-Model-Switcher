@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.3.5
+// @version      2.3.6
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
 // @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -195,7 +195,11 @@
       pushUnique(BASE_ORDER, result);
       return result;
     }
-    return BASE_ORDER;
+    // 非 pro：gpt-5-thinking 第一，α 第二，其余保持当前顺序
+    const ALPHA_ID = 'chatgpt_alpha_model_external_access_reserved_gate_13';
+    const FIRST_ID = 'gpt-5-thinking';
+    const rest = BASE_ORDER.filter(id => id !== FIRST_ID && id !== ALPHA_ID);
+    return [FIRST_ID, ALPHA_ID, ...rest];
   }
   const ALT_IDS = { 'gpt-4-1': ['gpt-4.1'], 'gpt-4-5': ['gpt-4.5'] };
 
@@ -235,7 +239,10 @@
     // 阿尔法模型对所有订阅可见
     if (norm === 'chatgpt_alpha_model_external_access_reserved_gate_13') return true;
     if (tier === 'free' || tier === 'go') {
-      return norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini';
+      // free/go 加上 gpt-5-thinking
+      return (
+        norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini' || norm === 'gpt-5-thinking'
+      );
     }
     if (tier === 'plus') {
       if (norm === 'gpt-5-pro' || norm === 'gpt-4-5') return false;
