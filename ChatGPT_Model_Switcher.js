@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.3.6
+// @version      2.3.7
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
 // @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -154,33 +154,33 @@
   } catch {}
 
   // 默认目标顺序（按 data-testid 后缀）
+  // 目标顺序（含 5.1 替换）：
+  // - 用 gpt-5-1-* 取代旧 gpt-5 非 Pro 系列在主菜单中的位置
+  // - 旧 gpt-5 非 Pro 系列统一降到末尾
   const BASE_ORDER = [
-    // 将阿尔法模型置于最前
-    'chatgpt_alpha_model_external_access_reserved_gate_13',
-    'gpt-5-thinking',
-    'gpt-5-t-mini',
-    'gpt-5-instant',
-    'gpt-5',
-    'gpt-5-mini',
+    'gpt-5-1-thinking',
+    // 原先紧随其后的“旧 5.x Thinking Mini/Instant/Auto/mini”位置由 5.1 系列承接
+    'gpt-5-1-instant',
+    'gpt-5-1',
     'o3',
     'o4-mini-high',
     'o4-mini',
     'gpt-4o',
     'gpt-4-1',
-    'o3-pro',
     'gpt-5-pro',
     'gpt-4-5',
+    'chatgpt_alpha_model_external_access_reserved_gate_13',
   ];
   const PRO_PRIORITY_ORDER = [
-    'gpt-5-thinking',
+    'gpt-5-1-thinking',
     'gpt-4-5',
     'o3',
     'o4-mini-high',
     'gpt-5-pro',
-    'o3-pro',
   ];
   function getDesiredOrder() {
     const tier = getTier() || SUB_DEFAULT;
+    const DEMOTED_OLD_G5 = ['gpt-5-thinking','gpt-5-instant','gpt-5','gpt-5-mini','gpt-5-t-mini'];
     if (tier === 'pro') {
       const seen = new Set();
       const pushUnique = (arr, target) => {
@@ -193,13 +193,18 @@
       const result = [];
       pushUnique(PRO_PRIORITY_ORDER, result);
       pushUnique(BASE_ORDER, result);
+      // 旧 5.x 非 Pro 系列统一降到底部
+      pushUnique(DEMOTED_OLD_G5, result);
+      // 最后追加 test 分组
+      pushUnique(TEST_GROUP_ORDER, result);
       return result;
     }
-    // 非 pro：gpt-5-thinking 第一，α 第二，其余保持当前顺序
+    // 非 pro：gpt-5-1-thinking 第一，α 第二，其余保持当前顺序
     const ALPHA_ID = 'chatgpt_alpha_model_external_access_reserved_gate_13';
-    const FIRST_ID = 'gpt-5-thinking';
+    const FIRST_ID = 'gpt-5-1-thinking';
     const rest = BASE_ORDER.filter(id => id !== FIRST_ID && id !== ALPHA_ID);
-    return [FIRST_ID, ALPHA_ID, ...rest];
+    // 旧 5.x 非 Pro 系列统一降到底部 + test 分组置于最末
+    return [FIRST_ID, ALPHA_ID, ...rest, ...DEMOTED_OLD_G5, ...TEST_GROUP_ORDER];
   }
   const ALT_IDS = { 'gpt-4-1': ['gpt-4.1'], 'gpt-4-5': ['gpt-4.5'] };
 
@@ -210,16 +215,25 @@
     'gpt-5-thinking',
     'gpt-5-pro',
     'gpt-5-t-mini',
+    // 新增 5.1 系列与旧 5.x 一致的“不自动收起”体验
+    'gpt-5-1',
+    'gpt-5-1-instant',
+    'gpt-5-1-thinking',
   ]);
 
   // 自定义模型项（若该菜单已经有官方同名项则不重复插入）
   const CUSTOM_MODELS = [
     { id: 'o3',           label: 'o3' },
-    { id: 'o3-pro',       label: 'o3 pro' },
     { id: 'gpt-4-1',      label: 'GPT 4.1' },
     { id: 'gpt-4o',       label: 'GPT 4o' },
     { id: 'o4-mini',      label: 'o4 mini' },
     { id: 'o4-mini-high', label: 'o4 mini high' },
+    // 新增 5.1 系列（替代旧 5.x 非 Pro）
+    { id: 'gpt-5-1',        label: 'GPT 5.1 Auto' },
+    { id: 'gpt-5-1-instant',label: 'GPT 5.1 Instant' },
+    { id: 'gpt-5-1-thinking', label: 'GPT 5.1 Thinking' },
+    
+    // 保留旧 5.x 非 Pro 作为“降序列”（将被挪到底部）
     { id: 'gpt-5',        label: 'GPT 5 Auto' },
     { id: 'gpt-5-instant',label: 'GPT 5 Instant' },
     { id: 'gpt-5-t-mini', label: 'GPT 5 Thinking Mini' },
@@ -234,26 +248,31 @@
   function isModelAllowed(id) {
     const norm = normalizeModelId(id);
     const tier = getTier() || SUB_DEFAULT;
-    // 修正：o3-pro 仅对 pro 可见；非 pro 隐藏 o3-pro
-    if (norm === 'o3-pro' && tier !== 'pro') return false;
-    // 阿尔法模型对所有订阅可见
-    if (norm === 'chatgpt_alpha_model_external_access_reserved_gate_13') return true;
+    
     if (tier === 'free' || tier === 'go') {
       // free/go 加上 gpt-5-thinking
+      // 扩展：允许 5.1 系列替代旧 5.x 非 Pro
       return (
-        norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini' || norm === 'gpt-5-thinking'
+        norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini' || norm === 'gpt-5-thinking' ||
+        norm === 'gpt-5-1' || norm === 'gpt-5-1-instant' || norm === 'gpt-5-1-thinking'
       );
     }
     if (tier === 'plus') {
-      if (norm === 'gpt-5-pro' || norm === 'gpt-4-5') return false;
+      // plus 删除 o3-pro（保留原有限制）
+      if (norm === 'o3-pro' || norm === 'gpt-5-pro' || norm === 'gpt-4-5') return false;
       return true;
     }
-    // team 目前无 GPT 4.5
+    // team 删除 o3-pro，且 team 目前无 GPT 4.5
     if (tier === 'team') {
-      if (norm === 'gpt-4-5') return false;
+      if (norm === 'gpt-4-5' || norm === 'o3-pro') return false;
       return true;
     }
-    // edu / enterprise / pro 其余按默认
+    // edu / enterprise 删除 o3-pro
+    if (tier === 'edu' || tier === 'enterprise') {
+      if (norm === 'o3-pro') return false;
+      return true;
+    }
+    // pro 全量可用
     return true;
   }
 
@@ -277,7 +296,15 @@
     'gpt-5-thinking': 'GPT 5 Thinking',
     'gpt-5-pro': 'GPT 5 Pro',
     'gpt-5-mini': 'GPT 5 mini',
+    // 5.1 系列显示名
+    'gpt-5-1': 'GPT 5.1 Auto',
+    'gpt-5-1-instant': 'GPT 5.1 Instant',
+    'gpt-5-1-thinking': 'GPT 5.1 Thinking',
+    
   }));
+
+  // test 分组：主菜单里单独一组，置于最底部
+  const TEST_GROUP_ORDER = [];
 
   function normalizeModelId(id) {
     if (!id) return '';
@@ -414,8 +441,8 @@
   // UI 微调：压缩 GPT‑5 系列二行描述、统一标题、隐藏“Legacy models”入口和相关分隔线。
   function normalizeMenuUI(menu) {
     try {
-      // 压缩 GPT‑5 系列项：去除第二行描述
-      const g5 = menu.querySelectorAll('[data-testid^="model-switcher-gpt-5"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5"]');
+      // 压缩 GPT‑5/5.1 系列项：去除第二行描述
+      const g5 = menu.querySelectorAll('[data-testid^="model-switcher-gpt-5"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5"], [data-testid^="model-switcher-gpt-5-1"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5-1"]');
       g5.forEach((el) => {
         const container = el.querySelector('.min-w-0');
         if (!container) return;
@@ -434,6 +461,10 @@
       rename('gpt-5-mini', 'GPT 5 mini');
       rename('gpt-5-thinking', 'GPT 5 Thinking');
       rename('gpt-5-pro', 'GPT 5 Pro');
+      // 新增 5.1 系列标题规范
+      rename('gpt-5-1', 'GPT 5.1 Auto');
+      rename('gpt-5-1-instant', 'GPT 5.1 Instant');
+      rename('gpt-5-1-thinking', 'GPT 5.1 Thinking');
 
       // 隐藏 Legacy models 子菜单入口
       const toHide = new Set();
@@ -609,6 +640,8 @@
       const item = createNativeLikeCustomItem(id, label || id);
       if (lastG5 && lastG5.parentElement === menuEl) lastG5.after(item); else menuEl.appendChild(item);
     }
+
+    // 删除 test 分组及相关条目注入
 
     menuEl.dataset.customized = 'true';
     try { normalizeMenuUI(menuEl); } catch {}
@@ -1249,7 +1282,7 @@
     span.dataset.fmItem = '1';
     return span;
   }
-  // 在“重试模型选择器”中找到锚点项，并插入若干快捷项（置于锚点项之前，使其位于顶部）。
+  // 在“重试模型选择器”中找到锚点项，并在其后插入若干快捷项。
   function enhanceVariantMenu(root) {
     if (!root || root.dataset.fmAugmented) return;
     if (!isVariantMenu(root)) return;
@@ -1266,17 +1299,22 @@
     if (!anchor) return;
     const anchorSpan = anchor.closest('span') || anchor;
     const ALL_QUICK = [
-      { label: 'α',            slug: 'chatgpt_alpha_model_external_access_reserved_gate_13' },
-      { label: 'o3 pro',       slug: 'o3-pro' },
       { label: 'GPT 5 mini',   slug: 'gpt-5-mini' },
       { label: 'o4 mini high', slug: 'o4-mini-high' },
       { label: 'GPT 4.5',      slug: 'gpt-4-5' },
+      { label: 'α',            slug: 'chatgpt_alpha_model_external_access_reserved_gate_13' },
     ];
+    // pro 订阅保留 o3 pro 快捷项并置于首位
+    try {
+      const tier = (getTier() || SUB_DEFAULT).toLowerCase();
+      if (tier === 'pro') {
+        ALL_QUICK.unshift({ label: 'o3 pro', slug: 'o3-pro' });
+      }
+    } catch {}
     const QUICK_MODELS = ALL_QUICK.filter(q => isModelAllowed(q.slug));
     QUICK_MODELS.forEach(q => {
       const node = createVariantMenuItem(q);
-      // 插入到锚点项之前，确保 Alpha 等快捷项位于菜单最前
-      anchorSpan.parentNode.insertBefore(node, anchorSpan);
+      anchorSpan.parentNode.insertBefore(node, anchorSpan.nextSibling);
     });
 
     // 捕获原生菜单项点击：当用户点击 Auto/Instant/Thinking/Pro/Ultra 等原生项时，
