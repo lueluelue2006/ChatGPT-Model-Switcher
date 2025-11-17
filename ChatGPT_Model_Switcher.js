@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.3.7
+// @version      2.3.8
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
 // @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -224,6 +224,7 @@
   // 自定义模型项（若该菜单已经有官方同名项则不重复插入）
   const CUSTOM_MODELS = [
     { id: 'o3',           label: 'o3' },
+    { id: 'o3-pro',       label: 'o3 pro' },
     { id: 'gpt-4-1',      label: 'GPT 4.1' },
     { id: 'gpt-4o',       label: 'GPT 4o' },
     { id: 'o4-mini',      label: 'o4 mini' },
