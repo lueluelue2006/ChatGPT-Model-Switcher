@@ -2,7 +2,7 @@
 // @name         ChatGPT模型选择器增强
 // @namespace    http://tampermonkey.net/
 // @author       schweigen
-// @version      2.3.9
+// @version      2.4.0
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
 // @match        *://*.chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
@@ -70,7 +70,7 @@
   // 订阅层级存储键与默认值
   const SUB_KEY = 'chatgpt-subscription-tier';
   const SUB_DEFAULT = 'plus';
-  const SUB_LEVELS = ['free','go','plus','team','edu','enterprise','pro'];
+  const SUB_LEVELS = ['free','go','plus','team','edu','enterprise','pro','test'];
 
   function gmGet(key, defVal = undefined) {
     try { if (typeof GM_getValue === 'function') return GM_getValue(key, defVal); } catch {}
@@ -94,7 +94,7 @@
   }
   function tierPromptText() {
     return '请选择订阅层级（仅出现一次，之后可在油猴菜单重新选择；不区分大小写）：\n' +
-      'free / go / plus / team / edu / enterprise / pro\n\n' +
+      'free / go / plus / team / edu / enterprise / pro / test\n\n' +
       '提示：若选错，可在油猴脚本菜单点击“重新选择订阅层级”。';
   }
   function chooseTierInteractively(defaultTier = SUB_DEFAULT, silent = false) {
@@ -131,6 +131,9 @@
             case 'pro':
               msg += '\n\n重要：如果无法使用老模型，可以看下设置里有没有开启“启用更多模型/老模型”';
               break;
+            case 'test':
+              msg += '\n\n提示：test 订阅仅供测试用途，仅在本脚本内生效。';
+              break;
           }
           alert(msg);
         } catch {}
@@ -162,23 +165,26 @@
     // 原先紧随其后的“旧 5.x Thinking Mini/Instant/Auto/mini”位置由 5.1 系列承接
     'gpt-5-1-instant',
     'gpt-5-1',
+    'gpt-5-1-pro',
     'o3',
-    'o4-mini-high',
     'o4-mini',
     'gpt-4o',
     'gpt-4-1',
-    'gpt-5-pro',
     'gpt-4-5',
     'chatgpt_alpha_model_external_access_reserved_gate_13',
   ];
   const PRO_PRIORITY_ORDER = [
     'gpt-5-1-thinking',
-    'gpt-5-pro',
+    'o4-mini',
     'gpt-4-5',
+    'gpt-5-1-pro',
+    'gpt-5-pro',
+    'o3-pro',
   ];
+  const TEST_ONLY_MODELS = ['gpt-5-1-max-thinking', 'gpt-5-1-max'];
   function getDesiredOrder() {
     const tier = getTier() || SUB_DEFAULT;
-    const DEMOTED_OLD_G5 = ['gpt-5-thinking','gpt-5-instant','gpt-5','gpt-5-mini','gpt-5-t-mini'];
+    const DEMOTED_OLD_G5 = ['gpt-5-thinking','gpt-5-instant','gpt-5','gpt-5-mini','gpt-5-t-mini','gpt-5-pro'];
     if (tier === 'pro') {
       const seen = new Set();
       const pushUnique = (arr, target) => {
@@ -217,6 +223,9 @@
     'gpt-5-1',
     'gpt-5-1-instant',
     'gpt-5-1-thinking',
+    'gpt-5-1-pro',
+    'gpt-5-1-max',
+    'gpt-5-1-max-thinking',
   ]);
 
   // 自定义模型项（若该菜单已经有官方同名项则不重复插入）
@@ -226,11 +235,13 @@
     { id: 'gpt-4-1',      label: 'GPT 4.1' },
     { id: 'gpt-4o',       label: 'GPT 4o' },
     { id: 'o4-mini',      label: 'o4 mini' },
-    { id: 'o4-mini-high', label: 'o4 mini high' },
     // 新增 5.1 系列（替代旧 5.x 非 Pro）
     { id: 'gpt-5-1',        label: 'GPT 5.1 Auto' },
     { id: 'gpt-5-1-instant',label: 'GPT 5.1 Instant' },
     { id: 'gpt-5-1-thinking', label: 'GPT 5.1 Thinking' },
+    { id: 'gpt-5-1-pro',     label: 'GPT 5.1 Pro' },
+    { id: 'gpt-5-1-max',      label: 'GPT 5.1 Max' },
+    { id: 'gpt-5-1-max-thinking', label: 'GPT 5.1 Max Thinking' },
     
     // 保留旧 5.x 非 Pro 作为“降序列”（将被挪到底部）
     { id: 'gpt-5',        label: 'GPT 5 Auto' },
@@ -243,10 +254,14 @@
     { id: 'chatgpt_alpha_model_external_access_reserved_gate_13', label: 'α' },
   ];
 
+  const TEST_ONLY_MODEL_SET = new Set(TEST_ONLY_MODELS);
+
   // 层级可用性规则
   function isModelAllowed(id) {
     const norm = normalizeModelId(id);
     const tier = getTier() || SUB_DEFAULT;
+    if (TEST_ONLY_MODEL_SET.has(norm)) return tier === 'test';
+    if (tier === 'test') return true;
     
     if (tier === 'free' || tier === 'go') {
       // free/go 加上 gpt-5-thinking
@@ -258,7 +273,7 @@
     }
     if (tier === 'plus') {
       // plus 删除 o3-pro（保留原有限制）
-      if (norm === 'o3-pro' || norm === 'gpt-5-pro' || norm === 'gpt-4-5') return false;
+      if (norm === 'o3-pro' || norm === 'gpt-5-pro' || norm === 'gpt-5-1-pro' || norm === 'gpt-4-5') return false;
       return true;
     }
     // team 删除 o3-pro，且 team 目前无 GPT 4.5
@@ -288,7 +303,6 @@
     'o3': 'o3',
     'o3-pro': 'o3 pro',
     'o4-mini': 'o4 mini',
-    'o4-mini-high': 'o4 mini high',
     'gpt-5': 'GPT 5 Auto',
     'gpt-5-instant': 'GPT 5 Instant',
     'gpt-5-t-mini': 'GPT 5 Thinking Mini',
@@ -299,11 +313,14 @@
     'gpt-5-1': 'GPT 5.1 Auto',
     'gpt-5-1-instant': 'GPT 5.1 Instant',
     'gpt-5-1-thinking': 'GPT 5.1 Thinking',
+    'gpt-5-1-pro': 'GPT 5.1 Pro',
+    'gpt-5-1-max': 'GPT 5.1 Max',
+    'gpt-5-1-max-thinking': 'GPT 5.1 Max Thinking',
     
   }));
 
   // test 分组：主菜单里单独一组，置于最底部
-  const TEST_GROUP_ORDER = [];
+  const TEST_GROUP_ORDER = [...TEST_ONLY_MODELS];
 
   function normalizeModelId(id) {
     if (!id) return '';
@@ -464,6 +481,9 @@
       rename('gpt-5-1', 'GPT 5.1 Auto');
       rename('gpt-5-1-instant', 'GPT 5.1 Instant');
       rename('gpt-5-1-thinking', 'GPT 5.1 Thinking');
+      rename('gpt-5-1-pro', 'GPT 5.1 Pro');
+      rename('gpt-5-1-max', 'GPT 5.1 Max');
+      rename('gpt-5-1-max-thinking', 'GPT 5.1 Max Thinking');
 
       // 隐藏 Legacy models 子菜单入口
       const toHide = new Set();
@@ -639,8 +659,6 @@
       const item = createNativeLikeCustomItem(id, label || id);
       if (lastG5 && lastG5.parentElement === menuEl) lastG5.after(item); else menuEl.appendChild(item);
     }
-
-    // 删除 test 分组及相关条目注入
 
     menuEl.dataset.customized = 'true';
     try { normalizeMenuUI(menuEl); } catch {}
@@ -1297,20 +1315,18 @@
     }
     if (!anchor) return;
     const anchorSpan = anchor.closest('span') || anchor;
-    const ALL_QUICK = [
-      { label: 'GPT 5 mini',   slug: 'gpt-5-mini' },
-      { label: 'o4 mini high', slug: 'o4-mini-high' },
-      { label: 'GPT 4.5',      slug: 'gpt-4-5' },
-      { label: 'α',            slug: 'chatgpt_alpha_model_external_access_reserved_gate_13' },
-    ];
-    // pro 订阅保留 o3 pro 快捷项并置于首位
-    try {
-      const tier = (getTier() || SUB_DEFAULT).toLowerCase();
-      if (tier === 'pro') {
-        ALL_QUICK.unshift({ label: 'o3 pro', slug: 'o3-pro' });
+    const QUICK_MODELS = (() => {
+      const list = [];
+      const seen = new Set();
+      const desired = getDesiredOrder();
+      for (const id of desired) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (!isModelAllowed(id)) continue;
+        list.push({ label: prettyName(id), slug: id });
       }
-    } catch {}
-    const QUICK_MODELS = ALL_QUICK.filter(q => isModelAllowed(q.slug));
+      return list;
+    })();
     QUICK_MODELS.forEach(q => {
       const node = createVariantMenuItem(q);
       anchorSpan.parentNode.insertBefore(node, anchorSpan.nextSibling);
