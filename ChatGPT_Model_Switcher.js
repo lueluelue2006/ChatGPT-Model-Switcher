@@ -4,7 +4,7 @@
 // @author       schweigen
 // @version      2.4.0
 // @description  增强 Main 模型选择器（黏性重排、防抖动、自定义项、丝滑切换、隐藏分组与Legacy）；并集成“使用其他模型重试的模型选择器”快捷项与30秒强制模型窗口（自动触发原生项或重试）；可以自定义模型顺序。特别鸣谢:attention1111(linux.do)，gpt-5；已适配 ChatGPT Atlas
-// @match        *://*.chatgpt.com/*
+// @match        https://chatgpt.com/*
 // @match        https://chatgpt.com/?model=*
 // @match        https://chatgpt.com/?temporary-chat=*
 // @match        https://chatgpt.com/c/*
@@ -70,7 +70,19 @@
   // 订阅层级存储键与默认值
   const SUB_KEY = 'chatgpt-subscription-tier';
   const SUB_DEFAULT = 'plus';
-  const SUB_LEVELS = ['free','go','plus','team','edu','enterprise','pro','test'];
+  const SUB_LEVELS = ['free','go','k12','plus','team','edu','enterprise','pro','test'];
+
+  function normalizeTierKey(tier) {
+    const raw = (tier || '').toString().trim().toLowerCase();
+    if (!raw) return '';
+    const key = raw.replace(/\s+/g, '-');
+    const aliases = {
+      'k12-teacher': 'k12',
+      'k12teacher': 'k12',
+    };
+    const mapped = aliases[key] || key;
+    return SUB_LEVELS.includes(mapped) ? mapped : '';
+  }
 
   function gmGet(key, defVal = undefined) {
     try { if (typeof GM_getValue === 'function') return GM_getValue(key, defVal); } catch {}
@@ -84,30 +96,29 @@
     try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
   }
   function getTier() {
-    const saved = (gmGet(SUB_KEY, '') || '').toString().trim().toLowerCase();
-    return SUB_LEVELS.includes(saved) ? saved : '';
+    return normalizeTierKey(gmGet(SUB_KEY, ''));
   }
   function setTier(tier) {
-    const norm = (tier || '').toString().trim().toLowerCase();
-    if (!SUB_LEVELS.includes(norm)) return;
+    const norm = normalizeTierKey(tier);
+    if (!norm) return;
     gmSet(SUB_KEY, norm);
   }
   function tierPromptText() {
     return '请选择订阅层级（仅出现一次，之后可在油猴菜单重新选择；不区分大小写）：\n' +
-      'free / go / plus / team / edu / enterprise / pro / test\n\n' +
+      'free / go / k12 / plus / team / edu / enterprise / pro / test\n\n' +
       '提示：若选错，可在油猴脚本菜单点击“重新选择订阅层级”。';
   }
   function chooseTierInteractively(defaultTier = SUB_DEFAULT, silent = false) {
     while (true) {
       const inputRaw = window.prompt(tierPromptText(), defaultTier);
       if (inputRaw == null) {
-        const chosen = (defaultTier || SUB_DEFAULT).toLowerCase();
+        const chosen = normalizeTierKey(defaultTier) || SUB_DEFAULT;
         setTier(chosen);
         if (!silent) { try { location.reload(); } catch {} }
         return chosen;
       }
-      const input = String(inputRaw).trim().toLowerCase();
-      if (!SUB_LEVELS.includes(input)) {
+      const input = normalizeTierKey(inputRaw);
+      if (!input) {
         try { alert('订阅层级无效，请重新输入'); } catch {}
         continue;
       }
@@ -152,20 +163,20 @@
   try {
     if (typeof GM_registerMenuCommand === 'function') {
       const currentTierForMenu = getTier() || '未设置';
-      GM_registerMenuCommand(`重新选择订阅层级（现在：${currentTierForMenu}）`, () => chooseTierInteractively());
+      GM_registerMenuCommand(`模型选择器设置（现在：${currentTierForMenu}）`, () => openSettingsPanel());
     }
   } catch {}
 
   // 默认目标顺序（按 data-testid 后缀）
-  // 目标顺序（含 5.1 替换）：
-  // - 用 gpt-5-1-* 取代旧 gpt-5 非 Pro 系列在主菜单中的位置
-  // - 旧 gpt-5 非 Pro 系列统一降到末尾
+  // 目标顺序（含 5.2 替换）：
+  // - 用 gpt-5-2-* 取代旧 gpt-5.1/5 非 Pro 系列在主菜单中的位置
+  // - 旧 gpt-5.1/5 系列统一降到末尾
   const BASE_ORDER = [
-    'gpt-5-1-thinking',
-    // 原先紧随其后的“旧 5.x Thinking Mini/Instant/Auto/mini”位置由 5.1 系列承接
-    'gpt-5-1-instant',
-    'gpt-5-1',
-    'gpt-5-1-pro',
+    'gpt-5-2-thinking',
+    // 原先紧随其后的“旧 5.x Thinking Mini/Instant/Auto/mini”位置由 5.2 系列承接
+    'gpt-5-2-instant',
+    'gpt-5-2',
+    'gpt-5-2-pro',
     'o3',
     'o4-mini',
     'gpt-4o',
@@ -174,53 +185,169 @@
     'chatgpt_alpha_model_external_access_reserved_gate_13',
   ];
   const PRO_PRIORITY_ORDER = [
-    'gpt-5-1-thinking',
+    'gpt-5-2-thinking',
     'o4-mini',
     'gpt-4-5',
-    'gpt-5-1-pro',
-    'gpt-5-pro',
+    'gpt-5-2-pro',
     'o3-pro',
   ];
   const TEST_ONLY_MODELS = ['gpt-5-1-max-thinking', 'gpt-5-1-max'];
-  function getDesiredOrder() {
-    const tier = getTier() || SUB_DEFAULT;
-    const DEMOTED_OLD_G5 = ['gpt-5-thinking','gpt-5-instant','gpt-5','gpt-5-mini','gpt-5-t-mini','gpt-5-pro'];
-    if (tier === 'pro') {
+  // 旧 5.1/5 系列降序列（按用户指定顺序）
+  const DEMOTED_OLD_G5 = [
+    'gpt-5-1-pro',
+    'gpt-5-pro',
+    'gpt-5-1-thinking',
+    'gpt-5-thinking',
+    'gpt-5-1-instant',
+    'gpt-5-instant',
+    // 其他旧 5.x 变体继续置底
+    'gpt-5-t-mini',
+    'gpt-5-mini',
+  ];
+
+  // 自定义排序（按订阅层级分别保存）
+  const ORDER_KEY_PREFIX = 'fm-custom-model-order-v1:';
+  const getOrderKey = (tier) => `${ORDER_KEY_PREFIX}${normalizeTierKey(tier) || 'unknown'}`;
+  function getCustomOrderForTier(tier) {
+    const raw = gmGet(getOrderKey(tier), []);
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const x of raw) {
+      const id = normalizeModelId(x);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  }
+  function setCustomOrderForTier(tier, list) {
+    const out = [];
+    const seen = new Set();
+    for (const x of (Array.isArray(list) ? list : [])) {
+      const id = normalizeModelId(x);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    gmSet(getOrderKey(tier), out);
+  }
+  function clearCustomOrderForTier(tier) {
+    gmSet(getOrderKey(tier), []);
+  }
+
+  // 自定义隐藏模型（按订阅层级分别保存）
+  const HIDE_KEY_PREFIX = 'fm-hidden-models-v1:';
+  const getHideKey = (tier) => `${HIDE_KEY_PREFIX}${normalizeTierKey(tier) || 'unknown'}`;
+  const HIDDEN_CACHE = new Map(); // tier -> Set<modelId>
+  function getHiddenModelSetForTier(tier) {
+    const t = normalizeTierKey(tier) || 'unknown';
+    if (HIDDEN_CACHE.has(t)) return HIDDEN_CACHE.get(t);
+    const raw = gmGet(getHideKey(t), []);
+    const set = new Set();
+    if (Array.isArray(raw)) {
+      for (const x of raw) {
+        const id = normalizeModelId(x);
+        if (!id) continue;
+        set.add(id);
+      }
+    }
+    HIDDEN_CACHE.set(t, set);
+    return set;
+  }
+  function setHiddenModelsForTier(tier, list) {
+    const t = normalizeTierKey(tier) || 'unknown';
+    const out = [];
+    const set = new Set();
+    for (const x of (Array.isArray(list) ? list : [])) {
+      const id = normalizeModelId(x);
+      if (!id || set.has(id)) continue;
+      set.add(id);
+      out.push(id);
+    }
+    gmSet(getHideKey(t), out);
+    HIDDEN_CACHE.set(t, set);
+  }
+  function clearHiddenModelsForTier(tier) {
+    const t = normalizeTierKey(tier) || 'unknown';
+    gmSet(getHideKey(t), []);
+    HIDDEN_CACHE.set(t, new Set());
+  }
+  function isModelHiddenForTier(id, tier) {
+    const norm = normalizeModelId(id);
+    if (!norm) return false;
+    return getHiddenModelSetForTier(tier).has(norm);
+  }
+  function isModelHidden(id) {
+    return isModelHiddenForTier(id, getTier() || SUB_DEFAULT);
+  }
+  function mergeOrderWithCustom(baseOrder, customOrder) {
+    const result = [];
+    const seen = new Set();
+    for (const id of (Array.isArray(customOrder) ? customOrder : [])) {
+      const norm = normalizeModelId(id);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      result.push(norm);
+    }
+    for (const id of (Array.isArray(baseOrder) ? baseOrder : [])) {
+      const norm = normalizeModelId(id);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      result.push(norm);
+    }
+    return result;
+  }
+
+  function getBaseDesiredOrderForTier(tier) {
+    const t = normalizeTierKey(tier) || SUB_DEFAULT;
+    if (t === 'pro') {
       const seen = new Set();
       const pushUnique = (arr, target) => {
         for (const id of arr) {
-          if (seen.has(id)) continue;
-          seen.add(id);
-          target.push(id);
+          const norm = normalizeModelId(id);
+          if (!norm || seen.has(norm)) continue;
+          seen.add(norm);
+          target.push(norm);
         }
       };
       const result = [];
       pushUnique(PRO_PRIORITY_ORDER, result);
       pushUnique(BASE_ORDER, result);
-      // 旧 5.x 非 Pro 系列统一降到底部
       pushUnique(DEMOTED_OLD_G5, result);
       // 最后追加 test 分组
       pushUnique(TEST_GROUP_ORDER, result);
       return result;
     }
-    // 非 pro：gpt-5-1-thinking 第一，α 第二，其余保持当前顺序
+    // 非 pro：gpt-5-2-thinking 第一，α 第二，其余保持当前顺序
     const ALPHA_ID = 'chatgpt_alpha_model_external_access_reserved_gate_13';
-    const FIRST_ID = 'gpt-5-1-thinking';
+    const FIRST_ID = 'gpt-5-2-thinking';
     const rest = BASE_ORDER.filter(id => id !== FIRST_ID && id !== ALPHA_ID);
-    // 旧 5.x 非 Pro 系列统一降到底部 + test 分组置于最末
-    return [FIRST_ID, ALPHA_ID, ...rest, ...DEMOTED_OLD_G5, ...TEST_GROUP_ORDER];
+    return [FIRST_ID, ALPHA_ID, ...rest, ...DEMOTED_OLD_G5, ...TEST_GROUP_ORDER].map(normalizeModelId);
+  }
+
+  function getDesiredOrder() {
+    const tier = getTier() || SUB_DEFAULT;
+    const base = getBaseDesiredOrderForTier(tier);
+    const custom = getCustomOrderForTier(tier);
+    const hidden = getHiddenModelSetForTier(tier);
+    return mergeOrderWithCustom(base, custom).filter(id => !hidden.has(id));
   }
   const ALT_IDS = { 'gpt-4-1': ['gpt-4.1'], 'gpt-4-5': ['gpt-4.5'] };
 
   // 点击后不自动收起菜单的模型（硬编码名单）
   const NO_CLOSE_ON_CHOOSE_IDS = new Set([
-    'gpt-5',
+    // 5.2 系列
+    'gpt-5-2',
+    'gpt-5-2-instant',
+    'gpt-5-2-thinking',
+    'gpt-5-2-pro',
+    // 旧 5.x 系列（保持“不自动收起”体验）
     'gpt-5-instant',
     'gpt-5-thinking',
     'gpt-5-pro',
     'gpt-5-t-mini',
-    // 新增 5.1 系列与旧 5.x 一致的“不自动收起”体验
-    'gpt-5-1',
+    'gpt-5-mini',
     'gpt-5-1-instant',
     'gpt-5-1-thinking',
     'gpt-5-1-pro',
@@ -235,59 +362,122 @@
     { id: 'gpt-4-1',      label: 'GPT 4.1' },
     { id: 'gpt-4o',       label: 'GPT 4o' },
     { id: 'o4-mini',      label: 'o4 mini' },
-    // 新增 5.1 系列（替代旧 5.x 非 Pro）
-    { id: 'gpt-5-1',        label: 'GPT 5.1 Auto' },
-    { id: 'gpt-5-1-instant',label: 'GPT 5.1 Instant' },
-    { id: 'gpt-5-1-thinking', label: 'GPT 5.1 Thinking' },
-    { id: 'gpt-5-1-pro',     label: 'GPT 5.1 Pro' },
-    { id: 'gpt-5-1-max',      label: 'GPT 5.1 Max' },
+    // 新增 5.2 系列（替代旧 5.1/5 非 Pro）
+    { id: 'gpt-5-2',          label: 'GPT 5.2 Auto' },
+    { id: 'gpt-5-2-instant',  label: 'GPT 5.2 Instant' },
+    { id: 'gpt-5-2-thinking', label: 'GPT 5.2 Thinking' },
+    { id: 'gpt-5-2-pro',      label: 'GPT 5.2 Pro' },
+
+    // 旧 5.1 系列（无无后缀版，仅保留变体/测试项）
+    { id: 'gpt-5-1-instant',    label: 'GPT 5.1 Instant' },
+    { id: 'gpt-5-1-thinking',   label: 'GPT 5.1 Thinking' },
+    { id: 'gpt-5-1-pro',        label: 'GPT 5.1 Pro' },
+    { id: 'gpt-5-1-max',        label: 'GPT 5.1 Max' },
     { id: 'gpt-5-1-max-thinking', label: 'GPT 5.1 Max Thinking' },
-    
-    // 保留旧 5.x 非 Pro 作为“降序列”（将被挪到底部）
-    { id: 'gpt-5',        label: 'GPT 5 Auto' },
-    { id: 'gpt-5-instant',label: 'GPT 5 Instant' },
-    { id: 'gpt-5-t-mini', label: 'GPT 5 Thinking Mini' },
-    { id: 'gpt-5-mini',   label: 'GPT 5 mini' },
+
+    // 旧 5 系列（无无后缀版，保留变体/mini）
+    { id: 'gpt-5-instant',  label: 'GPT 5 Instant' },
+    { id: 'gpt-5-t-mini',   label: 'GPT 5 Thinking Mini' },
+    { id: 'gpt-5-mini',     label: 'GPT 5 mini' },
     { id: 'gpt-5-thinking', label: 'GPT 5 Thinking' },
-    { id: 'gpt-5-pro',    label: 'GPT 5 Pro' },
+    { id: 'gpt-5-pro',      label: 'GPT 5 Pro' },
     { id: 'gpt-4-5',      label: 'GPT 4.5' },
     { id: 'chatgpt_alpha_model_external_access_reserved_gate_13', label: 'α' },
   ];
 
   const TEST_ONLY_MODEL_SET = new Set(TEST_ONLY_MODELS);
 
-  // 层级可用性规则
-  function isModelAllowed(id) {
+  // ---------------- 订阅层级可用性（按表格矩阵；忽略次数，仅判断可选/不可选） ----------------
+  const MODEL_GROUP = Object.freeze({
+    G5_PRO: 'g5_pro',          // gpt-5.2/5.1/5-pro（共享）
+    O3_PRO: 'o3_pro',
+    GPT_4_5: 'gpt_4_5',
+    G5_THINKING: 'g5_thinking',// gpt-5.2/5.1/5-thinking（共享，含 route 到的）
+    O3: 'o3',
+    G5_INSTANT: 'g5_instant',  // gpt-5.2/5.1/5-instant（共享，含 route 到的；含 Auto）
+    G5_T_MINI: 'g5_t_mini',
+    O4_MINI: 'o4_mini',
+    GPT_4O: 'gpt_4o',
+    GPT_4_1: 'gpt_4_1',
+    G5_MINI: 'g5_mini',
+  });
+
+  // 未列入矩阵的“未知模型”默认策略：
+  // - free/go/k12：严格，仅允许矩阵内列出的模型
+  // - plus/team/edu/enterprise/pro：宽松，未知模型默认放行（避免误伤新模型）
+  const STRICT_TIERS = new Set(['free', 'go', 'k12']);
+  // free/go/k12/plus 都没有任何 *-pro（包括 o3-pro、gpt-5-2-pro 等）
+  const NO_PRO_TIERS = new Set(['free', 'go', 'k12', 'plus']);
+
+  const TEAM_LIKE = [
+    MODEL_GROUP.G5_PRO,
+    MODEL_GROUP.G5_THINKING,
+    MODEL_GROUP.G5_INSTANT,
+    MODEL_GROUP.G5_T_MINI,
+    MODEL_GROUP.O3,
+    MODEL_GROUP.O4_MINI,
+    MODEL_GROUP.GPT_4O,
+    MODEL_GROUP.GPT_4_1,
+    MODEL_GROUP.G5_MINI,
+  ];
+
+  const TIER_ALLOWED_GROUPS = {
+    free: new Set([MODEL_GROUP.G5_THINKING, MODEL_GROUP.G5_INSTANT, MODEL_GROUP.G5_T_MINI, MODEL_GROUP.G5_MINI]),
+    go: new Set([MODEL_GROUP.G5_THINKING, MODEL_GROUP.G5_INSTANT, MODEL_GROUP.G5_T_MINI, MODEL_GROUP.G5_MINI]),
+    k12: new Set([MODEL_GROUP.G5_THINKING, MODEL_GROUP.G5_INSTANT, MODEL_GROUP.G5_MINI]),
+    plus: new Set([
+      MODEL_GROUP.G5_THINKING,
+      MODEL_GROUP.G5_INSTANT,
+      MODEL_GROUP.G5_T_MINI,
+      MODEL_GROUP.O3,
+      MODEL_GROUP.O4_MINI,
+      MODEL_GROUP.GPT_4O,
+      MODEL_GROUP.GPT_4_1,
+      MODEL_GROUP.G5_MINI,
+    ]),
+    team: new Set(TEAM_LIKE),
+    edu: new Set(TEAM_LIKE),
+    enterprise: new Set(TEAM_LIKE),
+    pro: new Set(Object.values(MODEL_GROUP)),
+  };
+
+  function getModelGroupById(norm) {
+    if (!norm) return '';
+    if (norm === 'o3-pro') return MODEL_GROUP.O3_PRO;
+    if (norm === 'gpt-4-5') return MODEL_GROUP.GPT_4_5;
+    if (norm === 'o3') return MODEL_GROUP.O3;
+    if (norm === 'o4-mini') return MODEL_GROUP.O4_MINI;
+    if (norm === 'gpt-4o') return MODEL_GROUP.GPT_4O;
+    if (norm === 'gpt-4-1') return MODEL_GROUP.GPT_4_1;
+    if (norm === 'gpt-5-t-mini') return MODEL_GROUP.G5_T_MINI;
+    if (norm === 'gpt-5-mini') return MODEL_GROUP.G5_MINI;
+
+    // gpt-5 系列（含 5 / 5.1 / 5.2）
+    if (/^gpt-5(?:-2|-1)?-pro$/.test(norm)) return MODEL_GROUP.G5_PRO;
+    if (/^gpt-5(?:-2|-1)?-thinking$/.test(norm)) return MODEL_GROUP.G5_THINKING;
+    if (/^gpt-5(?:-2|-1)?-instant$/.test(norm)) return MODEL_GROUP.G5_INSTANT;
+    if (/^gpt-5(?:-2|-1)?$/.test(norm)) return MODEL_GROUP.G5_INSTANT; // Auto（无后缀）
+    return '';
+  }
+
+  function isModelAllowedForTier(id, tier) {
     const norm = normalizeModelId(id);
-    const tier = getTier() || SUB_DEFAULT;
-    if (TEST_ONLY_MODEL_SET.has(norm)) return tier === 'test';
-    if (tier === 'test') return true;
-    
-    if (tier === 'free' || tier === 'go') {
-      // free/go 加上 gpt-5-thinking
-      // 扩展：允许 5.1 系列替代旧 5.x 非 Pro
-      return (
-        norm === 'gpt-5-t-mini' || norm === 'gpt-5' || norm === 'gpt-5-mini' || norm === 'gpt-5-thinking' ||
-        norm === 'gpt-5-1' || norm === 'gpt-5-1-instant' || norm === 'gpt-5-1-thinking'
-      );
-    }
-    if (tier === 'plus') {
-      // plus 删除 o3-pro（保留原有限制）
-      if (norm === 'o3-pro' || norm === 'gpt-5-pro' || norm === 'gpt-5-1-pro' || norm === 'gpt-4-5') return false;
-      return true;
-    }
-    // team 删除 o3-pro，且 team 目前无 GPT 4.5
-    if (tier === 'team') {
-      if (norm === 'gpt-4-5' || norm === 'o3-pro') return false;
-      return true;
-    }
-    // edu / enterprise 删除 o3-pro
-    if (tier === 'edu' || tier === 'enterprise') {
-      if (norm === 'o3-pro') return false;
-      return true;
-    }
-    // pro 全量可用
-    return true;
+    const t = normalizeTierKey(tier) || SUB_DEFAULT;
+    if (TEST_ONLY_MODEL_SET.has(norm)) return t === 'test';
+    if (t === 'test') return true;
+
+    // 统一规则：free/go/k12/plus 都没有任何 *-pro
+    if (NO_PRO_TIERS.has(t) && norm.endsWith('-pro')) return false;
+
+    const group = getModelGroupById(norm);
+    if (!group) return !STRICT_TIERS.has(t);
+    const allowed = TIER_ALLOWED_GROUPS[t];
+    if (!allowed) return true;
+    return allowed.has(group);
+  }
+
+  function isModelAllowed(id) {
+    return isModelAllowedForTier(id, getTier() || SUB_DEFAULT);
   }
 
   // ---------------- 工具 ----------------
@@ -309,6 +499,11 @@
     'gpt-5-thinking': 'GPT 5 Thinking',
     'gpt-5-pro': 'GPT 5 Pro',
     'gpt-5-mini': 'GPT 5 mini',
+    // 5.2 系列显示名
+    'gpt-5-2': 'GPT 5.2 Auto',
+    'gpt-5-2-instant': 'GPT 5.2 Instant',
+    'gpt-5-2-thinking': 'GPT 5.2 Thinking',
+    'gpt-5-2-pro': 'GPT 5.2 Pro',
     // 5.1 系列显示名
     'gpt-5-1': 'GPT 5.1 Auto',
     'gpt-5-1-instant': 'GPT 5.1 Instant',
@@ -353,6 +548,718 @@
     const currentModel = url.searchParams.get('model');
     if (!currentModel) return;
     setAllSwitcherButtonsModel(currentModel);
+  }
+
+  // ---------------- 设置面板（整合油猴菜单项） ----------------
+  const SETTINGS_STYLE_ID = 'fm-settings-style';
+  const SETTINGS_OVERLAY_ID = 'fm-settings-overlay';
+  let settingsKeydownHandler = null;
+
+  function ensureSettingsStyle() {
+    if (document.getElementById(SETTINGS_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = SETTINGS_STYLE_ID;
+    style.textContent = `
+      #${SETTINGS_OVERLAY_ID}{
+        position:fixed; inset:0; z-index:9999999998;
+        background:rgba(0,0,0,0.45);
+        display:flex; align-items:center; justify-content:center;
+        padding:16px;
+      }
+      #${SETTINGS_OVERLAY_ID} *{ box-sizing:border-box; }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-panel{
+        width:min(680px, 92vw); max-height:86vh;
+        display:flex; flex-direction:column; overflow:hidden;
+        border-radius:16px;
+        background:var(--token-surface-primary, #fff);
+        color:var(--token-text-primary, #111);
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        box-shadow:0 16px 48px rgba(0,0,0,0.18);
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-header{
+        padding:12px 14px;
+        display:flex; gap:12px; align-items:flex-start; justify-content:space-between;
+        border-bottom:1px solid var(--token-border, rgba(0,0,0,0.12));
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-title{ font-size:14px; font-weight:750; line-height:1.2; }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-subtitle{ margin-top:2px; font-size:12px; color:var(--token-text-tertiary, rgba(0,0,0,0.65)); }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-close{
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:var(--token-surface-secondary, rgba(0,0,0,0.03));
+        color:var(--token-text-primary, #111);
+        border-radius:10px;
+        padding:6px 10px;
+        font-size:12px;
+        cursor:pointer;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-body{
+        padding:12px 14px;
+        display:flex; flex-direction:column; gap:12px;
+        overflow:auto;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-settings-section{
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:var(--token-surface-secondary, rgba(0,0,0,0.03));
+        border-radius:14px;
+        padding:12px;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-sec-title{
+        font-size:13px; font-weight:700;
+        margin-bottom:8px;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-row{
+        display:flex; gap:10px; align-items:center; justify-content:space-between;
+        flex-wrap:wrap;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-row-left{
+        display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-hint{
+        margin-top:8px;
+        font-size:12px;
+        color:var(--token-text-tertiary, rgba(0,0,0,0.65));
+        line-height:1.35;
+      }
+      #${SETTINGS_OVERLAY_ID} select{
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:var(--token-surface-primary, #fff);
+        color:var(--token-text-primary, #111);
+        border-radius:10px;
+        padding:7px 10px;
+        font-size:12px;
+        min-width:180px;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-btn{
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:var(--token-surface-primary, #fff);
+        color:var(--token-text-primary, #111);
+        border-radius:10px;
+        padding:7px 10px;
+        font-size:12px;
+        cursor:pointer;
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-btn.primary{
+        background:#7c3aed;
+        color:#fff;
+        border-color:rgba(124,58,237,0.65);
+      }
+      #${SETTINGS_OVERLAY_ID} .fm-btn.danger{
+        background:rgba(239,68,68,0.08);
+        border-color:rgba(239,68,68,0.35);
+        color:rgba(153,27,27,1);
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function closeSettingsPanel() {
+    const overlay = document.getElementById(SETTINGS_OVERLAY_ID);
+    if (overlay) overlay.remove();
+    if (settingsKeydownHandler) {
+      try { window.removeEventListener('keydown', settingsKeydownHandler, true); } catch {}
+      settingsKeydownHandler = null;
+    }
+  }
+
+  function openSettingsPanel() {
+    if (!document.body) { setTimeout(openSettingsPanel, 50); return; }
+    if (document.getElementById(SETTINGS_OVERLAY_ID)) return;
+    // 避免叠加两个 overlay
+    try { closeModelOrderEditor(); } catch {}
+
+    ensureSettingsStyle();
+
+    const tierNow = getTier();
+    let selectedTier = (tierNow || SUB_DEFAULT);
+
+    const tierLabel = (t) => {
+      const map = {
+        free: 'Free',
+        go: 'Go',
+        k12: 'K12 Teacher',
+        plus: 'Plus',
+        team: 'Team',
+        edu: 'Edu',
+        enterprise: 'Enterprise',
+        pro: 'Pro',
+        test: 'Test（仅脚本内）',
+      };
+      return map[t] || t;
+    };
+
+    const overlay = document.createElement('div');
+    overlay.id = SETTINGS_OVERLAY_ID;
+    overlay.tabIndex = -1;
+
+    const panel = document.createElement('div');
+    panel.className = 'fm-settings-panel';
+
+    const header = document.createElement('div');
+    header.className = 'fm-settings-header';
+    const headLeft = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'fm-settings-title';
+    title.textContent = '模型选择器设置';
+    const subtitle = document.createElement('div');
+    subtitle.className = 'fm-settings-subtitle';
+    subtitle.textContent = `当前套餐：${tierNow ? tierLabel(tierNow) : '未设置'}（排序/隐藏按套餐分别保存）`;
+    headLeft.appendChild(title);
+    headLeft.appendChild(subtitle);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'fm-settings-close';
+    closeBtn.textContent = '关闭';
+    closeBtn.addEventListener('click', () => closeSettingsPanel());
+    header.appendChild(headLeft);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'fm-settings-body';
+
+    const secTier = document.createElement('div');
+    secTier.className = 'fm-settings-section';
+    const secTierTitle = document.createElement('div');
+    secTierTitle.className = 'fm-sec-title';
+    secTierTitle.textContent = '订阅层级';
+    const rowTier = document.createElement('div');
+    rowTier.className = 'fm-row';
+    const leftTier = document.createElement('div');
+    leftTier.className = 'fm-row-left';
+    const sel = document.createElement('select');
+    for (const t of SUB_LEVELS) {
+      const opt = document.createElement('option');
+      opt.value = t;
+      opt.textContent = tierLabel(t);
+      sel.appendChild(opt);
+    }
+    sel.value = normalizeTierKey(selectedTier) || SUB_DEFAULT;
+    sel.addEventListener('change', () => { selectedTier = sel.value; });
+    leftTier.appendChild(sel);
+    const btnSaveTier = document.createElement('button');
+    btnSaveTier.type = 'button';
+    btnSaveTier.className = 'fm-btn primary';
+    btnSaveTier.textContent = '保存层级';
+    btnSaveTier.addEventListener('click', () => {
+      const next = normalizeTierKey(selectedTier) || SUB_DEFAULT;
+      setTier(next);
+      subtitle.textContent = `当前套餐：${tierLabel(getTier() || next)}（自定义顺序按套餐分别保存）`;
+      try { alert(`已设置订阅层级：${next}\n\n提示：重新打开模型菜单即可生效。`); } catch {}
+    });
+    rowTier.appendChild(leftTier);
+    rowTier.appendChild(btnSaveTier);
+    const hintTier = document.createElement('div');
+    hintTier.className = 'fm-hint';
+    hintTier.textContent = '说明：这是脚本用来决定“显示/隐藏哪些模型”的本地设置，不会改变你的真实订阅权限。';
+    secTier.appendChild(secTierTitle);
+    secTier.appendChild(rowTier);
+    secTier.appendChild(hintTier);
+
+    const secOrder = document.createElement('div');
+    secOrder.className = 'fm-settings-section';
+    const secOrderTitle = document.createElement('div');
+    secOrderTitle.className = 'fm-sec-title';
+    secOrderTitle.textContent = '模型列表';
+    const rowOrder = document.createElement('div');
+    rowOrder.className = 'fm-row';
+    const leftOrder = document.createElement('div');
+    leftOrder.className = 'fm-row-left';
+    const btnEdit = document.createElement('button');
+    btnEdit.type = 'button';
+    btnEdit.className = 'fm-btn primary';
+    btnEdit.textContent = '编辑（排序/隐藏）';
+    btnEdit.addEventListener('click', () => {
+      const t = normalizeTierKey(selectedTier) || (getTier() || SUB_DEFAULT);
+      closeSettingsPanel();
+      openModelOrderEditor(t);
+    });
+    const btnReset = document.createElement('button');
+    btnReset.type = 'button';
+    btnReset.className = 'fm-btn danger';
+    btnReset.textContent = '重置为默认';
+    btnReset.addEventListener('click', () => {
+      const t = normalizeTierKey(selectedTier) || (getTier() || SUB_DEFAULT);
+      const ok = (() => { try { return confirm(`确定重置 ${t} 的“排序/隐藏”配置吗？`); } catch { return true; } })();
+      if (!ok) return;
+      clearCustomOrderForTier(t);
+      clearHiddenModelsForTier(t);
+      try { alert(`已重置：${t}\n\n提示：重新打开模型菜单即可生效。`); } catch {}
+    });
+    leftOrder.appendChild(btnEdit);
+    leftOrder.appendChild(btnReset);
+    const hintOrder = document.createElement('div');
+    hintOrder.className = 'fm-hint';
+    hintOrder.textContent = '编辑器支持拖拽排序，或选中后使用 ↑/↓；取消勾选即可隐藏；按套餐分别保存。';
+    rowOrder.appendChild(leftOrder);
+    secOrder.appendChild(secOrderTitle);
+    secOrder.appendChild(rowOrder);
+    secOrder.appendChild(hintOrder);
+
+    body.appendChild(secTier);
+    body.appendChild(secOrder);
+
+    panel.appendChild(header);
+    panel.appendChild(body);
+    overlay.appendChild(panel);
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSettingsPanel(); });
+    settingsKeydownHandler = (e) => {
+      if (!document.getElementById(SETTINGS_OVERLAY_ID)) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeSettingsPanel(); }
+    };
+    try { window.addEventListener('keydown', settingsKeydownHandler, true); } catch {}
+
+    document.body.appendChild(overlay);
+    try { overlay.focus({ preventScroll: true }); } catch {}
+  }
+
+  // ---------------- 自定义模型顺序：编辑器（拖拽 / ↑↓ 键） ----------------
+  const ORDER_EDITOR_STYLE_ID = 'fm-order-style';
+  const ORDER_EDITOR_OVERLAY_ID = 'fm-order-overlay';
+  let orderEditorKeydownHandler = null;
+  const TOAST_ID = 'fm-toast';
+  let toastTimer = null;
+
+  function showToast(text, ms = 1200) {
+    try {
+      if (!text) return;
+      if (!document.body) return;
+      let el = document.getElementById(TOAST_ID);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = TOAST_ID;
+        el.style.position = 'fixed';
+        el.style.left = '50%';
+        el.style.bottom = '24px';
+        el.style.transform = 'translateX(-50%)';
+        el.style.zIndex = '99999999999';
+        el.style.padding = '8px 12px';
+        el.style.borderRadius = '999px';
+        el.style.background = 'rgba(0,0,0,0.78)';
+        el.style.color = '#fff';
+        el.style.fontSize = '12px';
+        el.style.fontWeight = '600';
+        el.style.boxShadow = '0 8px 24px rgba(0,0,0,0.25)';
+        el.style.maxWidth = '80vw';
+        el.style.whiteSpace = 'nowrap';
+        el.style.overflow = 'hidden';
+        el.style.textOverflow = 'ellipsis';
+        el.style.pointerEvents = 'none';
+        el.style.transition = 'opacity 180ms ease';
+        document.body.appendChild(el);
+      }
+      el.textContent = text;
+      el.style.opacity = '1';
+      try { clearTimeout(toastTimer); } catch {}
+      toastTimer = setTimeout(() => {
+        try { el.style.opacity = '0'; } catch {}
+        setTimeout(() => { try { el.remove(); } catch {} }, 220);
+      }, ms);
+    } catch {
+      try { alert(String(text)); } catch {}
+    }
+  }
+
+  function ensureOrderEditorStyle() {
+    if (document.getElementById(ORDER_EDITOR_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = ORDER_EDITOR_STYLE_ID;
+    style.textContent = `
+      #${ORDER_EDITOR_OVERLAY_ID}{
+        position:fixed; inset:0; z-index:9999999999;
+        background:rgba(0,0,0,0.45);
+        display:flex; align-items:center; justify-content:center;
+        padding:16px;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} *{ box-sizing:border-box; }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-panel{
+        width:min(720px, 92vw); max-height:86vh;
+        display:flex; flex-direction:column; overflow:hidden;
+        border-radius:16px;
+        background:var(--token-surface-primary, #fff);
+        color:var(--token-text-primary, #111);
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        box-shadow:0 16px 48px rgba(0,0,0,0.18);
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-header{
+        padding:12px 14px;
+        display:flex; gap:12px; align-items:flex-start; justify-content:space-between;
+        border-bottom:1px solid var(--token-border, rgba(0,0,0,0.12));
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-title{ font-size:14px; font-weight:700; line-height:1.2; }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-subtitle{ margin-top:2px; font-size:12px; color:var(--token-text-tertiary, rgba(0,0,0,0.65)); }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-close{
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:var(--token-surface-secondary, rgba(0,0,0,0.03));
+        color:var(--token-text-primary, #111);
+        border-radius:10px;
+        padding:6px 10px;
+        font-size:12px;
+        cursor:pointer;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-body{
+        padding:12px 14px;
+        display:flex; flex-direction:column; gap:10px;
+        overflow:hidden;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-ops{
+        display:flex; align-items:center; justify-content:space-between;
+        gap:12px;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-tip{
+        font-size:12px; color:var(--token-text-tertiary, rgba(0,0,0,0.65));
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-only{
+        display:flex; align-items:center; gap:8px;
+        font-size:12px;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-list{
+        flex:1; overflow:auto;
+        padding:6px;
+        border-radius:12px;
+        background:var(--token-surface-secondary, rgba(0,0,0,0.03));
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-item{
+        display:flex;
+        gap:10px;
+        align-items:flex-start;
+        padding:10px 10px;
+        border-radius:12px;
+        background:var(--token-surface-primary, #fff);
+        border:1px solid transparent;
+        margin:6px 0;
+        user-select:none;
+        cursor:grab;
+        outline:none;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-check{
+        margin-top:2px;
+        flex:0 0 auto;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-meta{
+        flex:1 1 auto;
+        min-width:0;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-item:hover{ border-color:var(--token-border, rgba(0,0,0,0.18)); }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-item.is-selected{
+        border-color:#7c3aed;
+        box-shadow:0 0 0 3px rgba(124,58,237,0.15);
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-item.is-dragging{ opacity:0.65; cursor:grabbing; }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-item.is-hidden{
+        opacity:0.55;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-main{
+        display:flex; align-items:center; justify-content:space-between; gap:10px;
+        font-size:13px; font-weight:650;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-sub{
+        margin-top:2px;
+        font-size:11px;
+        color:var(--token-text-tertiary, rgba(0,0,0,0.65));
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-badge{
+        font-size:11px;
+        padding:1px 8px;
+        border-radius:999px;
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:rgba(0,0,0,0.04);
+        color:rgba(0,0,0,0.65);
+        flex:0 0 auto;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID}.fm-only-allowed .fm-order-item.is-disabled{ display:none; }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-footer{
+        padding:12px 14px;
+        display:flex; gap:10px; justify-content:flex-end; align-items:center;
+        border-top:1px solid var(--token-border, rgba(0,0,0,0.12));
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-btn{
+        border:1px solid var(--token-border, rgba(0,0,0,0.12));
+        background:var(--token-surface-secondary, rgba(0,0,0,0.03));
+        color:var(--token-text-primary, #111);
+        border-radius:10px;
+        padding:8px 12px;
+        font-size:12px;
+        cursor:pointer;
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-btn.primary{
+        background:#7c3aed;
+        color:#fff;
+        border-color:rgba(124,58,237,0.65);
+      }
+      #${ORDER_EDITOR_OVERLAY_ID} .fm-order-btn.danger{
+        background:rgba(239,68,68,0.08);
+        border-color:rgba(239,68,68,0.35);
+        color:rgba(153,27,27,1);
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function buildOrderEditorModelIds(tier) {
+    const ids = [];
+    const seen = new Set();
+    const push = (arr) => {
+      for (const x of (Array.isArray(arr) ? arr : [])) {
+        const id = normalizeModelId(x);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+      }
+    };
+    push(getCustomOrderForTier(tier));
+    push(getBaseDesiredOrderForTier(tier));
+    try { push(CUSTOM_MODELS.map(m => m.id)); } catch {}
+    push(TEST_ONLY_MODELS);
+    // 确保已隐藏但不在清单中的“未知模型”也能被取消隐藏
+    try { push(Array.from(getHiddenModelSetForTier(tier))); } catch {}
+    return ids;
+  }
+
+  function closeModelOrderEditor() {
+    const overlay = document.getElementById(ORDER_EDITOR_OVERLAY_ID);
+    if (overlay) overlay.remove();
+    if (orderEditorKeydownHandler) {
+      try { window.removeEventListener('keydown', orderEditorKeydownHandler, true); } catch {}
+      orderEditorKeydownHandler = null;
+    }
+  }
+
+  function openModelOrderEditor(forceTier) {
+    const forced = normalizeTierKey(forceTier);
+    if (!forced) { try { ensureTierChosen(); } catch {} }
+    const tier = forced || getTier() || SUB_DEFAULT;
+    if (!document.body) { setTimeout(() => openModelOrderEditor(forceTier), 50); return; }
+    if (document.getElementById(ORDER_EDITOR_OVERLAY_ID)) return;
+
+    ensureOrderEditorStyle();
+    const hiddenWorking = new Set(getHiddenModelSetForTier(tier));
+
+    const overlay = document.createElement('div');
+    overlay.id = ORDER_EDITOR_OVERLAY_ID;
+    overlay.className = 'fm-only-allowed';
+    overlay.tabIndex = -1;
+
+    const panel = document.createElement('div');
+    panel.className = 'fm-order-panel';
+
+    const header = document.createElement('div');
+    header.className = 'fm-order-header';
+    const headLeft = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'fm-order-title';
+    title.textContent = '模型列表（排序/隐藏）';
+    const subtitle = document.createElement('div');
+    subtitle.className = 'fm-order-subtitle';
+    subtitle.textContent = `当前套餐：${tier}（拖拽排序，或选中后用 ↑/↓；取消勾选=隐藏）`;
+    headLeft.appendChild(title);
+    headLeft.appendChild(subtitle);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'fm-order-close';
+    closeBtn.textContent = '关闭';
+    const saveAndClose = () => {
+      const ids = Array.from(list.querySelectorAll('.fm-order-item')).map(el => normalizeModelId(el.dataset.id || '')).filter(Boolean);
+      setCustomOrderForTier(tier, ids);
+      setHiddenModelsForTier(tier, Array.from(hiddenWorking));
+      closeModelOrderEditor();
+      showToast('已保存');
+    };
+    closeBtn.addEventListener('click', () => saveAndClose());
+    header.appendChild(headLeft);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'fm-order-body';
+
+    const ops = document.createElement('div');
+    ops.className = 'fm-order-ops';
+    const tip = document.createElement('div');
+    tip.className = 'fm-order-tip';
+    tip.textContent = '提示：只影响本脚本的菜单显示与排序；不改变你的真实订阅权限。';
+    const onlyWrap = document.createElement('label');
+    onlyWrap.className = 'fm-order-only';
+    const only = document.createElement('input');
+    only.type = 'checkbox';
+    only.checked = true;
+    const onlyTxt = document.createElement('span');
+    onlyTxt.textContent = '仅显示当前可用';
+    only.addEventListener('change', () => {
+      overlay.classList.toggle('fm-only-allowed', !!only.checked);
+    });
+    onlyWrap.appendChild(only);
+    onlyWrap.appendChild(onlyTxt);
+    ops.appendChild(tip);
+    ops.appendChild(onlyWrap);
+
+    const list = document.createElement('div');
+    list.className = 'fm-order-list';
+    list.setAttribute('role', 'listbox');
+
+    let dragging = null;
+    const selectItem = (el) => {
+      list.querySelectorAll('.fm-order-item.is-selected').forEach(n => n.classList.remove('is-selected'));
+      el.classList.add('is-selected');
+      try { el.focus({ preventScroll: true }); } catch {}
+    };
+    const moveSelected = (delta) => {
+      const sel = list.querySelector('.fm-order-item.is-selected');
+      if (!sel) return;
+      const sib = delta < 0 ? sel.previousElementSibling : sel.nextElementSibling;
+      if (!sib || !sib.classList?.contains('fm-order-item')) return;
+      if (delta < 0) list.insertBefore(sel, sib); else list.insertBefore(sel, sib.nextSibling);
+      selectItem(sel);
+      try { sel.scrollIntoView({ block: 'nearest' }); } catch {}
+    };
+
+    const render = () => {
+      list.textContent = '';
+      const ids = buildOrderEditorModelIds(tier);
+      for (const id of ids) {
+        const item = document.createElement('div');
+        item.className = 'fm-order-item';
+        item.tabIndex = 0;
+        item.draggable = true;
+        item.dataset.id = id;
+        const allowed = isModelAllowedForTier(id, tier);
+        if (!allowed) item.classList.add('is-disabled');
+        if (hiddenWorking.has(id)) item.classList.add('is-hidden');
+
+        const cb = document.createElement('input');
+        cb.className = 'fm-order-check';
+        cb.type = 'checkbox';
+        cb.checked = !hiddenWorking.has(id);
+        cb.addEventListener('change', () => {
+          if (cb.checked) hiddenWorking.delete(id);
+          else hiddenWorking.add(id);
+          item.classList.toggle('is-hidden', hiddenWorking.has(id));
+        });
+
+        const meta = document.createElement('div');
+        meta.className = 'fm-order-meta';
+        const main = document.createElement('div');
+        main.className = 'fm-order-main';
+        const name = document.createElement('span');
+        name.textContent = `${prettyName(id)}(${id})`;
+        main.appendChild(name);
+        if (!allowed) {
+          const badge = document.createElement('span');
+          badge.className = 'fm-order-badge';
+          badge.textContent = '不可用';
+          main.appendChild(badge);
+        }
+        meta.appendChild(main);
+        item.appendChild(cb);
+        item.appendChild(meta);
+
+        item.addEventListener('click', () => { selectItem(item); });
+        item.addEventListener('focus', () => selectItem(item));
+        list.appendChild(item);
+      }
+      const first = list.querySelector('.fm-order-item');
+      if (first) selectItem(first);
+    };
+
+    list.addEventListener('dragstart', (e) => {
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      const item = t.closest('.fm-order-item');
+      if (!item) return;
+      dragging = item;
+      selectItem(item);
+      item.classList.add('is-dragging');
+      try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', item.dataset.id || ''); } catch {}
+    });
+    list.addEventListener('dragover', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      const over = t.closest('.fm-order-item');
+      if (!over || over === dragging) return;
+      const rect = over.getBoundingClientRect();
+      const after = e.clientY > rect.top + rect.height / 2;
+      list.insertBefore(dragging, after ? over.nextSibling : over);
+    });
+    list.addEventListener('drop', (e) => { if (dragging) e.preventDefault(); });
+    list.addEventListener('dragend', () => {
+      if (dragging) dragging.classList.remove('is-dragging');
+      dragging = null;
+    });
+
+    const footer = document.createElement('div');
+    footer.className = 'fm-order-footer';
+    const showAllBtn = document.createElement('button');
+    showAllBtn.type = 'button';
+    showAllBtn.className = 'fm-order-btn';
+    showAllBtn.textContent = '全选';
+    showAllBtn.addEventListener('click', () => {
+      hiddenWorking.clear();
+      list.querySelectorAll('.fm-order-item').forEach((el) => {
+        el.classList.remove('is-hidden');
+        const cb = el.querySelector('input.fm-order-check');
+        if (cb) cb.checked = true;
+      });
+    });
+    const hideAllBtn = document.createElement('button');
+    hideAllBtn.type = 'button';
+    hideAllBtn.className = 'fm-order-btn';
+    hideAllBtn.textContent = '全不选';
+    hideAllBtn.addEventListener('click', () => {
+      const ids = Array.from(list.querySelectorAll('.fm-order-item')).map(el => normalizeModelId(el.dataset.id || '')).filter(Boolean);
+      hiddenWorking.clear();
+      ids.forEach(id => hiddenWorking.add(id));
+      list.querySelectorAll('.fm-order-item').forEach((el) => {
+        el.classList.add('is-hidden');
+        const cb = el.querySelector('input.fm-order-check');
+        if (cb) cb.checked = false;
+      });
+    });
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'fm-order-btn danger';
+    resetBtn.textContent = '重置为默认';
+    resetBtn.addEventListener('click', () => {
+      clearCustomOrderForTier(tier);
+      clearHiddenModelsForTier(tier);
+      hiddenWorking.clear();
+      render();
+      try { alert('已重置。重新打开模型菜单即可生效。'); } catch {}
+    });
+    const closeBtn2 = document.createElement('button');
+    closeBtn2.type = 'button';
+    closeBtn2.className = 'fm-order-btn primary';
+    closeBtn2.textContent = '关闭';
+    closeBtn2.addEventListener('click', () => saveAndClose());
+
+    footer.appendChild(showAllBtn);
+    footer.appendChild(hideAllBtn);
+    footer.appendChild(resetBtn);
+    footer.appendChild(closeBtn2);
+
+    body.appendChild(ops);
+    body.appendChild(list);
+
+    panel.appendChild(header);
+    panel.appendChild(body);
+    panel.appendChild(footer);
+    overlay.appendChild(panel);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) saveAndClose(); });
+
+    orderEditorKeydownHandler = (e) => {
+      if (!document.getElementById(ORDER_EDITOR_OVERLAY_ID)) return;
+      if (e.key === 'Escape') { e.preventDefault(); saveAndClose(); return; }
+      const target = e.target;
+      const tag = target && target.tagName ? String(target.tagName).toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+      if (e.key === 'ArrowUp') { e.preventDefault(); moveSelected(-1); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveSelected(1); return; }
+    };
+    try { window.addEventListener('keydown', orderEditorKeydownHandler, true); } catch {}
+
+    document.body.appendChild(overlay);
+    render();
+    try { overlay.focus({ preventScroll: true }); } catch {}
   }
 
   function findAssociatedMenu(triggerBtn) {
@@ -457,8 +1364,8 @@
   // UI 微调：压缩 GPT‑5 系列二行描述、统一标题、隐藏“Legacy models”入口和相关分隔线。
   function normalizeMenuUI(menu) {
     try {
-      // 压缩 GPT‑5/5.1 系列项：去除第二行描述
-      const g5 = menu.querySelectorAll('[data-testid^="model-switcher-gpt-5"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5"], [data-testid^="model-switcher-gpt-5-1"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5-1"]');
+      // 压缩 GPT‑5/5.1/5.2 系列项：去除第二行描述
+      const g5 = menu.querySelectorAll('[data-testid^="model-switcher-gpt-5"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5"], [data-testid^="model-switcher-gpt-5-1"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5-1"], [data-testid^="model-switcher-gpt-5-2"], [data-radix-collection-item][data-testid^="model-switcher-gpt-5-2"]');
       g5.forEach((el) => {
         const container = el.querySelector('.min-w-0');
         if (!container) return;
@@ -471,6 +1378,11 @@
               || menu.querySelector(`[data-testid="model-switcher-${key}"] .min-w-0 span`);
         if (n) n.textContent = text;
       };
+      // 新增 5.2 系列标题规范
+      rename('gpt-5-2', 'GPT 5.2 Auto');
+      rename('gpt-5-2-instant', 'GPT 5.2 Instant');
+      rename('gpt-5-2-thinking', 'GPT 5.2 Thinking');
+      rename('gpt-5-2-pro', 'GPT 5.2 Pro');
       rename('gpt-5', 'GPT 5 Auto');
       rename('gpt-5-instant', 'GPT 5 Instant');
       rename('gpt-5-t-mini', 'GPT 5 Thinking Mini');
@@ -520,6 +1432,8 @@
   // 按订阅层级隐藏/显示菜单项（官方项与自定义项均处理）
   function syncMenuByTier(menu) {
     try {
+      const tier = getTier() || SUB_DEFAULT;
+      const hidden = getHiddenModelSetForTier(tier);
       // 遍历当前菜单中所有“模型项”（官方或自定义）
       const allItems = Array.from(menu.querySelectorAll('[data-radix-collection-item][data-testid^="model-switcher-"], [data-testid^="model-switcher-"]'));
       for (const el of allItems) {
@@ -530,9 +1444,10 @@
         // 升为顶层节点
         let n = el;
         while (n && n.parentElement && n.parentElement !== menu) n = n.parentElement;
-        const allowed = isModelAllowed(id);
+        const allowed = isModelAllowedForTier(id, tier);
+        const visible = allowed && !hidden.has(id);
         if (n && n instanceof HTMLElement) {
-          if (allowed) {
+          if (visible) {
             if (n.dataset.extTierHidden === '1') {
               n.style.display = '';
               delete n.dataset.extTierHidden;
@@ -647,8 +1562,11 @@
     // 在最后一个 GPT‑5 原生项后插入（找不到就追加到末尾）
     const anchors = menuEl.querySelectorAll('[data-radix-collection-item][data-testid^="model-switcher-gpt-5"]');
     const lastG5 = anchors[anchors.length - 1];
+    const tier = getTier() || SUB_DEFAULT;
+    const hidden = getHiddenModelSetForTier(tier);
 
     for (const { id, label } of CUSTOM_MODELS) {
+      if (hidden.has(normalizeModelId(id))) continue;
       // 过滤：订阅层级不允许的模型不插入
       if (!isModelAllowed(id)) continue;
       // 跳过：若菜单中已有原生同 id 项
